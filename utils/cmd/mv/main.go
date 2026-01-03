@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -170,7 +171,7 @@ func copyFile(src, dest string) error {
 			}
 		}
 		if err != nil {
-			if err.Error() == "EOF" {
+			if err == io.EOF {
 				break
 			}
 			return err

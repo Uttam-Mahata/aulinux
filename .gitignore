@@ -4,9 +4,9 @@ build/
 # C/Kernel modules
 *.o
 *.ko
-*.mod
 *.mod.c
 *.mod.o
+# Note: *.mod removed to allow go.mod files
 .tmp_versions/
 modules.order
 Module.symvers

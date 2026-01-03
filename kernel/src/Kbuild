@@ -1,0 +1,13 @@
+# AULinux Kernel Modules Kbuild File
+#
+# This file is used by the Linux kernel build system (kbuild)
+# to compile AULinux kernel modules.
+
+# Module definitions
+obj-m += aulinux_core.o
+obj-m += aulinux_sysctl.o
+obj-m += aulinux_procmon.o
+
+# Additional compiler flags
+ccflags-y := -I$(src)
+ccflags-y += -DAULINUX_MODULE

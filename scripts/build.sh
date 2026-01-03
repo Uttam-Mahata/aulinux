@@ -1,0 +1,167 @@
+#!/bin/bash
+#
+# AULinux Build Script
+# Builds all components of the AULinux distribution.
+#
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Project root
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_DIR="$PROJECT_ROOT/build"
+
+# Print colored message
+info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Print banner
+print_banner() {
+    echo ""
+    echo "  ╔═══════════════════════════════════════╗"
+    echo "  ║     AULinux Build System v1.0.0       ║"
+    echo "  ╚═══════════════════════════════════════╝"
+    echo ""
+}
+
+# Build kernel modules
+build_kernel() {
+    info "Building kernel modules..."
+    cd "$PROJECT_ROOT/kernel"
+    if make; then
+        success "Kernel modules built"
+    else
+        warn "Kernel modules build failed (may require kernel headers)"
+    fi
+}
+
+# Build init system
+build_init() {
+    info "Building init system..."
+    cd "$PROJECT_ROOT/init"
+    make
+    success "Init system built"
+}
+
+# Build shell
+build_shell() {
+    info "Building shell (aush)..."
+    cd "$PROJECT_ROOT/shell"
+    mkdir -p "$BUILD_DIR/shell"
+    go build -o "$BUILD_DIR/shell/aush" .
+    success "Shell built"
+}
+
+# Build utilities
+build_utils() {
+    info "Building utilities..."
+    cd "$PROJECT_ROOT/utils"
+    mkdir -p "$BUILD_DIR/utils"
+    go build -o "$BUILD_DIR/utils/" ./cmd/...
+    success "Utilities built: $(ls "$BUILD_DIR/utils" | tr '\n' ' ')"
+}
+
+# Build package manager
+build_pkgmanager() {
+    info "Building package manager (aupkg)..."
+    cd "$PROJECT_ROOT/pkg-manager"
+    mvn package -q -DskipTests
+    mkdir -p "$BUILD_DIR/pkg-manager"
+    cp target/aupkg-*.jar "$BUILD_DIR/pkg-manager/"
+    success "Package manager built"
+}
+
+# Clean all build artifacts
+clean() {
+    info "Cleaning build artifacts..."
+    rm -rf "$BUILD_DIR"
+    cd "$PROJECT_ROOT/kernel" && make clean 2>/dev/null || true
+    cd "$PROJECT_ROOT/init" && make clean 2>/dev/null || true
+    cd "$PROJECT_ROOT/pkg-manager" && mvn clean -q 2>/dev/null || true
+    success "Clean complete"
+}
+
+# Build all components
+build_all() {
+    print_banner
+    mkdir -p "$BUILD_DIR"
+    
+    build_init
+    build_shell
+    build_utils
+    build_pkgmanager
+    build_kernel
+    
+    echo ""
+    success "All components built successfully!"
+    echo ""
+    echo "Build artifacts in: $BUILD_DIR"
+    ls -la "$BUILD_DIR"
+}
+
+# Show help
+show_help() {
+    echo "Usage: $0 [command]"
+    echo ""
+    echo "Commands:"
+    echo "  all        Build all components (default)"
+    echo "  kernel     Build kernel modules only"
+    echo "  init       Build init system only"
+    echo "  shell      Build shell only"
+    echo "  utils      Build utilities only"
+    echo "  pkgmanager Build package manager only"
+    echo "  clean      Clean all build artifacts"
+    echo "  help       Show this help message"
+}
+
+# Main
+case "${1:-all}" in
+    all)
+        build_all
+        ;;
+    kernel)
+        build_kernel
+        ;;
+    init)
+        build_init
+        ;;
+    shell)
+        build_shell
+        ;;
+    utils)
+        build_utils
+        ;;
+    pkgmanager|pkg-manager)
+        build_pkgmanager
+        ;;
+    clean)
+        clean
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        error "Unknown command: $1"
+        show_help
+        exit 1
+        ;;
+esac

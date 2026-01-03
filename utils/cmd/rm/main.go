@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 const version = "1.0.0"
@@ -114,13 +113,6 @@ func remove(path string) error {
 }
 
 func removeRecursive(path string) error {
-	return filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		return nil
-	})
-	// Use RemoveAll for simplicity
 	return os.RemoveAll(path)
 }
 

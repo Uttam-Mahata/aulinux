@@ -3,83 +3,105 @@
 ## Project Overview
 AULinux (Absolutely Unique Linux) is a custom Linux distribution project designed to integrate components written in C, Go, and Java.
 - **Goal:** Create a functioning OS with a custom kernel, init system, shell, utilities, and package manager.
-- **Current Status:** The project currently appears to be a **skeleton or template**. While build configuration files (`Makefile`, `pom.xml`, `go.mod`) exist, the actual source code directories (`src/`, etc.) and implementation files are largely missing from the repository.
+- **Current Status:** The project has **functional implementations** of all major components.
 
 ## Directory Structure & Components
 
 ### 1. Kernel (`kernel/`)
 - **Language:** C
 - **Role:** Core OS kernel modules and drivers.
-- **Build System:** `Makefile` (targets `src/*.c`).
-- **Status:** Makefile exists, but `src/` directory is missing.
+- **Build System:** `Makefile` with Kbuild integration.
+- **Status:** ✅ Implemented - 3 kernel modules:
+  - `aulinux_core.c` - Core module with /proc/aulinux interface
+  - `aulinux_sysctl.c` - Sysctl configuration at /proc/sys/aulinux/
+  - `aulinux_procmon.c` - Process lifecycle monitor with kprobes
 
 ### 2. Init System (`init/`)
 - **Language:** C
 - **Role:** PID 1, system startup and service management.
-- **Build System:** `Makefile` (targets `src/init.c`).
-- **Status:** Makefile exists, but `src/` directory is missing.
+- **Build System:** `Makefile` (static linking).
+- **Status:** ✅ Implemented - Full init system with:
+  - Filesystem mounting (proc, sys, dev, etc.)
+  - Signal handling and process reaping
+  - Shell launching
+  - Shutdown/reboot handling
 
 ### 3. Package Manager (`pkg-manager/`)
-- **Language:** Java (Maven)
+- **Language:** Java 17 (Maven)
 - **Role:** Dependency management and package installation (`aupkg`).
 - **Build System:** Maven (`pom.xml`).
 - **Artifact:** `org.aulinux:aupkg:1.0.0-SNAPSHOT`
-- **Status:** `pom.xml` exists. `src/` is missing, though a `target/` directory exists.
+- **Status:** ✅ Implemented - CLI with commands:
+  - install, remove, update, upgrade, search, info, list
 
 ### 4. Utilities (`utils/`)
 - **Language:** Go
-- **Role:** Core system utilities (ls, cp, cat) reimplemented for safety.
+- **Role:** Core system utilities reimplemented for safety.
 - **Module:** `github.com/aulinux/utils`
-- **Status:** `go.mod` exists. No `.go` source files present.
+- **Status:** ✅ Implemented - 8 utilities:
+  - ls, cat, cp, mv, rm, mkdir, pwd, echo
 
 ### 5. Shell (`shell/`)
-- **Language:** Go (intended)
+- **Language:** Go
 - **Role:** Custom shell (`aush`).
-- **Status:** Directory is empty.
+- **Module:** `github.com/aulinux/shell`
+- **Status:** ✅ Implemented - Full shell with:
+  - Command parsing and execution
+  - Builtins (cd, pwd, echo, export, history, etc.)
+  - Pipes and redirections
+  - Command history
+  - Colored prompt
 
-### 6. Bootloader (`bootloader/`)
-- **Language:** C (intended)
-- **Role:** Boot process handling.
-- **Status:** Directory is empty.
-
-### 7. Scripts (`scripts/`)
+### 6. Scripts (`scripts/`)
 - **Role:** Automation and build scripts.
-- **Status:** Directory is empty. The `README.md` references a `scripts/build.sh` which is currently missing.
+- **Status:** ✅ `build.sh` - Builds all components.
 
-## Build & Run Instructions (Theoretical)
+## Build & Run Instructions
 
-Since the `scripts/build.sh` is missing, components must be built individually. **Note:** These commands will currently fail due to missing source files.
+### Full Build
+```bash
+./scripts/build.sh
+```
 
-### Kernel
+### Individual Components
+
+#### Kernel Modules
 ```bash
 cd kernel
 make
-# Intended output: ../build/kernel/*.o
+# Output: ../build/kernel/*.ko
 ```
 
-### Init System
+#### Init System
 ```bash
 cd init
 make
-# Intended output: ../build/init/au-init
+# Output: ../build/init/au-init
 ```
 
-### Package Manager
+#### Package Manager
 ```bash
 cd pkg-manager
 mvn package
-# Intended output: target/aupkg-1.0.0-SNAPSHOT.jar
+# Output: target/aupkg-1.0.0-SNAPSHOT.jar
 ```
 
-### Utilities
+#### Shell
+```bash
+cd shell
+go build -o ../build/shell/aush .
+```
+
+#### Utilities
 ```bash
 cd utils
-go build ./...
+go build -o ../build/utils/ ./cmd/...
 ```
 
-## Development Conventions (Inferred)
+## Development Conventions
 - **Language Specialization:**
-  - **C:** Low-level system components (Kernel, Init, Bootloader).
+  - **C:** Low-level system components (Kernel, Init).
   - **Go:** System userland tools (Shell, Utils).
   - **Java:** Complex application logic (Package Manager).
-- **Build Output:** Build artifacts seem intended to be collected in a top-level `build/` directory (referenced in Makefiles).
+- **Build Output:** Artifacts collected in `build/` directory.
+- **Go Modules:** Use `github.com/aulinux/` prefix.

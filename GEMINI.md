@@ -1,9 +1,9 @@
 # AULinux Project Context
 
 ## Project Overview
-AULinux (Absolutely Unique Linux) is a custom Linux distribution project designed to integrate components written in C, Go, and Java.
+AULinux (Absolutely Unique Linux) is a custom Linux distribution project designed to integrate components written in C, Go, and Rust.
 - **Goal:** Create a functioning OS with a custom kernel, init system, shell, utilities, and package manager.
-- **Current Status:** The project currently appears to be a **skeleton or template**. While build configuration files (`Makefile`, `pom.xml`, `go.mod`) exist, the actual source code directories (`src/`, etc.) and implementation files are largely missing from the repository.
+- **Current Status:** The project currently appears to be a **skeleton or template**. While build configuration files (`Makefile`, `Cargo.toml`, `go.mod`) exist, the actual source code directories (`src/`, etc.) and implementation files are largely missing from the repository (except for `pkg-manager` which is implemented in Rust).
 
 ## Directory Structure & Components
 
@@ -20,11 +20,10 @@ AULinux (Absolutely Unique Linux) is a custom Linux distribution project designe
 - **Status:** Makefile exists, but `src/` directory is missing.
 
 ### 3. Package Manager (`pkg-manager/`)
-- **Language:** Java (Maven)
+- **Language:** Rust (Cargo)
 - **Role:** Dependency management and package installation (`aupkg`).
-- **Build System:** Maven (`pom.xml`).
-- **Artifact:** `org.aulinux:aupkg:1.0.0-SNAPSHOT`
-- **Status:** `pom.xml` exists. `src/` is missing, though a `target/` directory exists.
+- **Build System:** Cargo (`Cargo.toml`).
+- **Status:** `Cargo.toml` exists. `src/` is populated.
 
 ### 4. Utilities (`utils/`)
 - **Language:** Go
@@ -67,8 +66,8 @@ make
 ### Package Manager
 ```bash
 cd pkg-manager
-mvn package
-# Intended output: target/aupkg-1.0.0-SNAPSHOT.jar
+cargo build --release
+# Intended output: target/release/aupkg
 ```
 
 ### Utilities
@@ -81,5 +80,5 @@ go build ./...
 - **Language Specialization:**
   - **C:** Low-level system components (Kernel, Init, Bootloader).
   - **Go:** System userland tools (Shell, Utils).
-  - **Java:** Complex application logic (Package Manager).
+  - **Rust:** Complex application logic (Package Manager).
 - **Build Output:** Build artifacts seem intended to be collected in a top-level `build/` directory (referenced in Makefiles).

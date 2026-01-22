@@ -23,18 +23,9 @@ Module.symvers
 go.work
 go.work.sum
 
-# Java/Maven
+# Rust/Cargo
 pkg-manager/target/
-*.class
-*.jar
-*.war
-*.nar
-*.ear
-*.zip
-*.tar.gz
-*.rar
-hs_err_pid*
-replay_pid*
+**/*.rs.bk
 
 # IDE
 .idea/

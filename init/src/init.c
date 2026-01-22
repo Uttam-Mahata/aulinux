@@ -25,6 +25,14 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <time.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <sys/ioctl.h>
+#include <net/if.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
 #define AUINIT_VERSION "1.0.0"
 #define MAX_SERVICES 32
@@ -153,6 +161,25 @@ static int mount_filesystems(void)
         }
     } else {
         log_msg("INFO", "Mounted /tmp");
+    }
+
+    /* Bring up loopback interface */
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock >= 0) {
+        struct ifreq ifr;
+        memset(&ifr, 0, sizeof(ifr));
+        strncpy(ifr.ifr_name, "lo", IFNAMSIZ);
+        if (ioctl(sock, SIOCGIFFLAGS, &ifr) >= 0) {
+            ifr.ifr_flags |= (IFF_UP | IFF_RUNNING);
+            if (ioctl(sock, SIOCSIFFLAGS, &ifr) < 0) {
+                 log_msg("WARN", "Failed to bring up lo: %s", strerror(errno));
+            } else {
+                 log_msg("INFO", "Interface lo is up");
+            }
+        }
+        close(sock);
+    } else {
+        log_msg("WARN", "Failed to open socket for network config");
     }
 
     return 0;

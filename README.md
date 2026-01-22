@@ -1,6 +1,6 @@
 # AULinux (Absolutely Unique Linux)
 
-A custom Linux distribution built with C, Go, and Java.
+A custom Linux distribution built with C, Go, and Rust.
 
 ## Project Structure
 
@@ -11,7 +11,7 @@ AULinux/
 ├── init/            # C - Init system (PID 1)
 ├── shell/           # Go - Custom shell (aush)
 ├── utils/           # Go - Core utilities (ls, cat, cp, etc.)
-├── pkg-manager/     # Java - Package manager (aupkg)
+├── pkg-manager/     # Rust - Package manager (aupkg)
 ├── docs/            # Documentation
 ├── build/           # Build output
 └── scripts/         # Build and automation scripts
@@ -21,7 +21,7 @@ AULinux/
 
 - **C**: Kernel, bootloader, init system (low-level components)
 - **Go**: Shell, core utilities (system tools)
-- **Java**: Package manager (complex application logic)
+- **Rust**: Package manager (complex application logic)
 
 ## Getting Started
 
@@ -29,7 +29,7 @@ AULinux/
 
 - GCC (for C components)
 - Go 1.21+
-- JDK 17+
+- Rust 1.70+
 - Make
 
 ### Building
@@ -52,7 +52,7 @@ Lightweight init system managing services and system startup.
 ### Utilities (Go)
 Core system utilities reimplemented in Go for safety and performance.
 
-### Package Manager - aupkg (Java)
+### Package Manager - aupkg (Rust)
 Full-featured package manager with dependency resolution.
 
 

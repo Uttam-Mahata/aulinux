@@ -84,9 +84,9 @@ build_utils() {
 build_pkgmanager() {
     info "Building package manager (aupkg)..."
     cd "$PROJECT_ROOT/pkg-manager"
-    mvn package -q -DskipTests
+    cargo build --release
     mkdir -p "$BUILD_DIR/pkg-manager"
-    cp target/aupkg-*.jar "$BUILD_DIR/pkg-manager/"
+    cp target/release/aupkg "$BUILD_DIR/pkg-manager/"
     success "Package manager built"
 }
 
@@ -96,7 +96,7 @@ clean() {
     rm -rf "$BUILD_DIR"
     cd "$PROJECT_ROOT/kernel" && make clean 2>/dev/null || true
     cd "$PROJECT_ROOT/init" && make clean 2>/dev/null || true
-    cd "$PROJECT_ROOT/pkg-manager" && mvn clean -q 2>/dev/null || true
+    cd "$PROJECT_ROOT/pkg-manager" && cargo clean 2>/dev/null || true
     success "Clean complete"
 }
 

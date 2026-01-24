@@ -21,6 +21,41 @@ const (
 	maxHistory  = 1000
 )
 
+// JobState represents the state of a job
+type JobState int
+
+const (
+	JobRunning JobState = iota
+	JobStopped
+	JobDone
+	JobTerminated
+)
+
+func (js JobState) String() string {
+	switch js {
+	case JobRunning:
+		return "Running"
+	case JobStopped:
+		return "Stopped"
+	case JobDone:
+		return "Done"
+	case JobTerminated:
+		return "Terminated"
+	default:
+		return "Unknown"
+	}
+}
+
+// Job represents a background job
+type Job struct {
+	ID       int
+	PID      int
+	Command  string
+	State    JobState
+	Process  *os.Process
+	DoneChan chan struct{}
+}
+
 // Shell represents the shell state
 type Shell struct {
 	user       *user.User
@@ -30,6 +65,8 @@ type Shell struct {
 	exitCode   int
 	running    bool
 	loginShell bool
+	jobs       []*Job
+	nextJobID  int
 }
 
 // Builtins maps builtin command names to their implementations
@@ -47,6 +84,9 @@ func init() {
 		"help":    builtinHelp,
 		"version": builtinVersion,
 		"type":    builtinType,
+		"jobs":    builtinJobs,
+		"fg":      builtinFg,
+		"bg":      builtinBg,
 	}
 }
 
@@ -84,6 +124,8 @@ func NewShell() *Shell {
 		running:    true,
 		history:    make([]string, 0, maxHistory),
 		historyPos: 0,
+		jobs:       make([]*Job, 0),
+		nextJobID:  1,
 	}
 
 	// Get current user
@@ -160,6 +202,16 @@ func (s *Shell) ExecuteCommand(line string) int {
 		return 0
 	}
 
+	// Check for background task
+	background := false
+	if len(args) > 0 && args[len(args)-1] == "&" {
+		background = true
+		args = args[:len(args)-1]
+		if len(args) == 0 {
+			return 0
+		}
+	}
+
 	// Handle redirections
 	args, stdin, stdout, stderr, err := s.parseRedirections(args)
 	if err != nil {
@@ -187,7 +239,7 @@ func (s *Shell) ExecuteCommand(line string) int {
 	}
 
 	// Execute external command
-	return s.executeExternal(args, stdin, stdout, stderr)
+	return s.executeExternal(args, stdin, stdout, stderr, background)
 }
 
 // parseCommand splits a command line into arguments
@@ -216,6 +268,12 @@ func (s *Shell) parseCommand(line string) []string {
 					args = append(args, current.String())
 					current.Reset()
 				}
+			case '&':
+				if current.Len() > 0 {
+					args = append(args, current.String())
+					current.Reset()
+				}
+				args = append(args, "&")
 			case '\\':
 				if i+1 < len(line) {
 					i++
@@ -335,12 +393,28 @@ func (s *Shell) executePipeline(line string) int {
 	}
 
 	var cmds []*exec.Cmd
-	for _, part := range parts {
+	var argSets [][]string
+	background := false
+
+	// Parse all commands
+	for i, part := range parts {
 		args := s.parseCommand(strings.TrimSpace(part))
 		if len(args) == 0 {
 			continue
 		}
+
+		// Check for background in the last command
+		if i == len(parts)-1 && len(args) > 0 && args[len(args)-1] == "&" {
+			background = true
+			args = args[:len(args)-1]
+		}
+
+		if len(args) == 0 {
+			continue
+		}
+
 		args = s.expandVariables(args)
+		argSets = append(argSets, args)
 		cmd := exec.Command(args[0], args[1:]...)
 		cmds = append(cmds, cmd)
 	}
@@ -373,6 +447,36 @@ func (s *Shell) executePipeline(line string) int {
 		}
 	}
 
+	// If background, don't wait, just add to jobs
+	if background {
+		// We track the last command in the pipeline
+		lastCmd := cmds[len(cmds)-1]
+		job := &Job{
+			ID:       s.nextJobID,
+			PID:      lastCmd.Process.Pid,
+			Command:  line, // approximate command
+			State:    JobRunning,
+			Process:  lastCmd.Process,
+			DoneChan: make(chan struct{}),
+		}
+		s.jobs = append(s.jobs, job)
+		s.nextJobID++
+		fmt.Printf("[%d] %d\n", job.ID, job.PID)
+
+		// Wait in background
+		go func() {
+			// Wait for all commands in pipeline
+			for _, cmd := range cmds {
+				cmd.Wait()
+			}
+			job.State = JobDone
+			close(job.DoneChan)
+			fmt.Printf("[%d] Done %s\n", job.ID, job.Command)
+		}()
+
+		return 0
+	}
+
 	// Wait for all commands
 	var exitCode int
 	for _, cmd := range cmds {
@@ -387,11 +491,39 @@ func (s *Shell) executePipeline(line string) int {
 }
 
 // executeExternal runs an external command
-func (s *Shell) executeExternal(args []string, stdin, stdout, stderr *os.File) int {
+func (s *Shell) executeExternal(args []string, stdin, stdout, stderr *os.File, background bool) int {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
+
+	if background {
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "aush: %s: %v\n", args[0], err)
+			return 127
+		}
+
+		job := &Job{
+			ID:       s.nextJobID,
+			PID:      cmd.Process.Pid,
+			Command:  strings.Join(args, " "),
+			State:    JobRunning,
+			Process:  cmd.Process,
+			DoneChan: make(chan struct{}),
+		}
+		s.jobs = append(s.jobs, job)
+		s.nextJobID++
+		fmt.Printf("[%d] %d\n", job.ID, job.PID)
+
+		go func() {
+			cmd.Wait()
+			job.State = JobDone
+			close(job.DoneChan)
+			fmt.Printf("[%d] Done %s\n", job.ID, job.Command)
+		}()
+
+		return 0
+	}
 
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -669,4 +801,107 @@ func printHelp() {
 	fmt.Println("  -l, --login   Start as a login shell")
 	fmt.Println("  --version     Show version information")
 	fmt.Println("  --help        Show this help message")
+}
+
+func (s *Shell) cleanupJobs() {
+	var activeJobs []*Job
+	for _, job := range s.jobs {
+		if job.State != JobDone && job.State != JobTerminated {
+			activeJobs = append(activeJobs, job)
+		}
+	}
+	s.jobs = activeJobs
+}
+
+func builtinJobs(s *Shell, args []string) int {
+	s.cleanupJobs()
+	for _, job := range s.jobs {
+		fmt.Printf("[%d] %d %s %s\n", job.ID, job.PID, job.State, job.Command)
+	}
+	return 0
+}
+
+func builtinFg(s *Shell, args []string) int {
+	if len(args) == 0 {
+		// Bring last job to foreground
+		if len(s.jobs) == 0 {
+			fmt.Fprintln(os.Stderr, "fg: no current job")
+			return 1
+		}
+		// Use last job
+		job := s.jobs[len(s.jobs)-1]
+		return bringToForeground(s, job)
+	}
+
+	// Parse %n or n
+	idStr := args[0]
+	if strings.HasPrefix(idStr, "%") {
+		idStr = idStr[1:]
+	}
+
+	var id int
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		fmt.Fprintf(os.Stderr, "fg: %s: no such job\n", args[0])
+		return 1
+	}
+
+	for _, job := range s.jobs {
+		if job.ID == id {
+			return bringToForeground(s, job)
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "fg: %s: no such job\n", args[0])
+	return 1
+}
+
+func bringToForeground(s *Shell, job *Job) int {
+	fmt.Println(job.Command)
+
+	// In a real shell, we would tcsetpgrp here.
+	// Here we just wait for it.
+
+    // Check if channel is closed
+    select {
+    case <-job.DoneChan:
+        return 0
+    default:
+        <-job.DoneChan
+        return 0
+    }
+}
+
+func builtinBg(s *Shell, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "bg: job ID required")
+		return 1
+	}
+
+	// Parse %n or n
+	idStr := args[0]
+	if strings.HasPrefix(idStr, "%") {
+		idStr = idStr[1:]
+	}
+
+	var id int
+	if _, err := fmt.Sscanf(idStr, "%d", &id); err != nil {
+		fmt.Fprintf(os.Stderr, "bg: %s: no such job\n", args[0])
+		return 1
+	}
+
+	for _, job := range s.jobs {
+		if job.ID == id {
+			// Send SIGCONT
+			if err := job.Process.Signal(syscall.SIGCONT); err != nil {
+				fmt.Fprintf(os.Stderr, "bg: failed to send SIGCONT: %v\n", err)
+				return 1
+			}
+			job.State = JobRunning
+			fmt.Printf("[%d] %s &\n", job.ID, job.Command)
+			return 0
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "bg: %s: no such job\n", args[0])
+	return 1
 }

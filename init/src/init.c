@@ -75,6 +75,7 @@ static void signal_handler(int sig);
 static void setup_signals(void);
 static void reap_children(void);
 static pid_t spawn_process(const char *path, char *const argv[]);
+static void load_services(void);
 static int start_shell(void);
 static void shutdown_system(int reboot);
 
@@ -327,6 +328,70 @@ static pid_t spawn_process(const char *path, char *const argv[])
 }
 
 /**
+ * Load services from configuration file
+ */
+static void load_services(void)
+{
+    FILE *fp;
+    char line[512];
+    char *name, *cmd;
+    char *argv[64];
+    int i;
+    pid_t pid;
+
+    log_msg("INFO", "Loading services from %s", SERVICE_CONFIG);
+
+    fp = fopen(SERVICE_CONFIG, "r");
+    if (!fp) {
+        log_msg("WARN", "Could not open service config: %s", strerror(errno));
+        return;
+    }
+
+    while (fgets(line, sizeof(line), fp)) {
+        /* Strip newline */
+        line[strcspn(line, "\n")] = 0;
+
+        /* Skip comments and empty lines */
+        if (line[0] == '#' || line[0] == 0) continue;
+
+        /* Parse name=command args */
+        name = strtok(line, "=");
+        cmd = strtok(NULL, ""); /* Get rest of string */
+
+        if (!name || !cmd) continue;
+
+        /* Parse arguments */
+        memset(argv, 0, sizeof(argv));
+        i = 0;
+        argv[i++] = strtok(cmd, " ");
+        while ((argv[i++] = strtok(NULL, " ")) != NULL) {
+            if (i >= 63) break;
+        }
+        argv[63] = NULL; /* Ensure NULL termination in case of overflow */
+
+        if (argv[0] == NULL) continue;
+
+        log_msg("INFO", "Starting service: %s (%s)", name, argv[0]);
+        pid = spawn_process(argv[0], argv);
+
+        if (pid > 0) {
+             if (service_count < MAX_SERVICES) {
+                strncpy(services[service_count].name, name, sizeof(services[0].name) - 1);
+                strncpy(services[service_count].command, argv[0], sizeof(services[0].command) - 1);
+                services[service_count].pid = pid;
+                services[service_count].state = SERVICE_RUNNING;
+                services[service_count].last_start = time(NULL);
+                service_count++;
+            } else {
+                log_msg("WARN", "Max services reached, cannot track %s", name);
+            }
+        }
+    }
+
+    fclose(fp);
+}
+
+/**
  * Start the user shell
  */
 static int start_shell(void)
@@ -496,6 +561,11 @@ int main(int argc, char *argv[])
     }
 
     log_msg("INFO", "System initialization complete");
+
+    /* Load and start services */
+    if (my_pid == 1) {
+        load_services();
+    }
 
     /* Start the shell */
     if (start_shell() < 0) {

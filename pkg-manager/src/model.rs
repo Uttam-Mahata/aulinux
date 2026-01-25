@@ -23,6 +23,8 @@ pub struct Package {
     pub installed: bool,
     #[serde(default)]
     pub install_date: i64,
+    #[serde(default)]
+    pub files: Vec<String>,
 }
 
 impl Package {
@@ -42,6 +44,7 @@ impl Package {
             license: None,
             installed: false,
             install_date: 0,
+            files: vec![],
         }
     }
 

@@ -1,6 +1,6 @@
-// Package main implements the mkdir command for AULinux.
+// Package mkdir implements the mkdir command for AULinux.
 // Creates directories.
-package main
+package mkdir
 
 import (
 	"flag"
@@ -12,27 +12,33 @@ import (
 const version = "1.0.0"
 
 var (
-	makeParents = flag.Bool("p", false, "make parent directories as needed")
-	mode        = flag.String("m", "", "set file mode (as in chmod)")
-	verbose     = flag.Bool("v", false, "print a message for each created directory")
-	showVersion = flag.Bool("version", false, "show version")
+	makeParents *bool
+	mode        *string
+	verbose     *bool
+	showVersion *bool
 )
 
-func main() {
-	flag.Usage = func() {
+func Run(args []string) {
+	fs := flag.NewFlagSet("mkdir", flag.ExitOnError)
+	makeParents = fs.Bool("p", false, "make parent directories as needed")
+	mode = fs.String("m", "", "set file mode (as in chmod)")
+	verbose = fs.Bool("v", false, "print a message for each created directory")
+	showVersion = fs.Bool("version", false, "show version")
+
+	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: mkdir [OPTIONS] DIRECTORY...\n\n")
 		fmt.Fprintf(os.Stderr, "Create the DIRECTORY(ies), if they do not already exist.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 	}
-	flag.Parse()
+	fs.Parse(args)
 
 	if *showVersion {
 		fmt.Printf("mkdir (AULinux coreutils) %s\n", version)
 		os.Exit(0)
 	}
 
-	if flag.NArg() == 0 {
+	if fs.NArg() == 0 {
 		fmt.Fprintln(os.Stderr, "mkdir: missing operand")
 		os.Exit(1)
 	}
@@ -49,14 +55,16 @@ func main() {
 	}
 
 	exitCode := 0
-	for _, dir := range flag.Args() {
+	for _, dir := range fs.Args() {
 		if err := makeDir(dir, perm); err != nil {
 			fmt.Fprintf(os.Stderr, "mkdir: %v\n", err)
 			exitCode = 1
 		}
 	}
 
-	os.Exit(exitCode)
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 func makeDir(path string, perm os.FileMode) error {

@@ -1,4 +1,4 @@
-package main
+package groupadd
 
 import (
 	"bufio"
@@ -10,13 +10,13 @@ import (
 
 const groupFile = "/etc/group"
 
-func main() {
-	if len(os.Args) < 2 {
+func Run(args []string) {
+	if len(args) < 1 {
 		fmt.Println("Usage: groupadd <groupname>")
 		os.Exit(1)
 	}
 
-	groupname := os.Args[1]
+	groupname := args[0]
 
 	if groupExists(groupname) {
 		fmt.Printf("Group '%s' already exists\n", groupname)

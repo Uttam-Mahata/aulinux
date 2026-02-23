@@ -1,6 +1,6 @@
-// Package main implements the chmod command for AULinux.
+// Package chmod implements the chmod command for AULinux.
 // Changes file mode bits.
-package main
+package chmod
 
 import (
 	"flag"
@@ -13,33 +13,38 @@ import (
 const version = "1.0.0"
 
 var (
-	recursive   = flag.Bool("R", false, "change files and directories recursively")
-	verbose     = flag.Bool("v", false, "output a diagnostic for every file processed")
-	showVersion = flag.Bool("version", false, "show version")
+	recursive   *bool
+	verbose     *bool
+	showVersion *bool
 )
 
-func main() {
-	flag.Usage = func() {
+func Run(args []string) {
+	fs := flag.NewFlagSet("chmod", flag.ExitOnError)
+	recursive = fs.Bool("R", false, "change files and directories recursively")
+	verbose = fs.Bool("v", false, "output a diagnostic for every file processed")
+	showVersion = fs.Bool("version", false, "show version")
+
+	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: chmod [OPTIONS] MODE FILE...\n")
 		fmt.Fprintf(os.Stderr, "Change the mode of each FILE to MODE.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 	}
-	flag.Parse()
+	fs.Parse(args)
 
 	if *showVersion {
 		fmt.Printf("chmod (AULinux coreutils) %s\n", version)
 		os.Exit(0)
 	}
 
-	args := flag.Args()
-	if len(args) < 2 {
+	cliArgs := fs.Args()
+	if len(cliArgs) < 2 {
 		fmt.Fprintln(os.Stderr, "chmod: missing operand")
 		os.Exit(1)
 	}
 
-	modeStr := args[0]
-	files := args[1:]
+	modeStr := cliArgs[0]
+	files := cliArgs[1:]
 
 	// Parse mode
 	// TODO: Support symbolic modes (e.g. u+x)
@@ -58,7 +63,9 @@ func main() {
 		}
 	}
 
-	os.Exit(exitCode)
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 func changeMode(path string, mode os.FileMode) error {

@@ -1,6 +1,6 @@
-// Package main implements the cat command for AULinux.
+// Package cat implements the cat command for AULinux.
 // Concatenates and displays file contents.
-package main
+package cat
 
 import (
 	"bufio"
@@ -13,24 +13,33 @@ import (
 const version = "1.0.0"
 
 var (
-	showNumbers    = flag.Bool("n", false, "number all output lines")
-	showNonBlank   = flag.Bool("b", false, "number non-blank output lines")
-	showEnds       = flag.Bool("E", false, "display $ at end of each line")
-	showTabs       = flag.Bool("T", false, "display TAB as ^I")
-	squeezeBlank   = flag.Bool("s", false, "squeeze multiple blank lines")
-	showNonPrint   = flag.Bool("v", false, "show non-printing characters")
-	showVersion    = flag.Bool("version", false, "show version")
+	showNumbers    *bool
+	showNonBlank   *bool
+	showEnds       *bool
+	showTabs       *bool
+	squeezeBlank   *bool
+	showNonPrint   *bool
+	showVersion    *bool
 )
 
-func main() {
-	flag.Usage = func() {
+func Run(args []string) {
+	fs := flag.NewFlagSet("cat", flag.ExitOnError)
+	showNumbers = fs.Bool("n", false, "number all output lines")
+	showNonBlank = fs.Bool("b", false, "number non-blank output lines")
+	showEnds = fs.Bool("E", false, "display $ at end of each line")
+	showTabs = fs.Bool("T", false, "display TAB as ^I")
+	squeezeBlank = fs.Bool("s", false, "squeeze multiple blank lines")
+	showNonPrint = fs.Bool("v", false, "show non-printing characters")
+	showVersion = fs.Bool("version", false, "show version")
+
+	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: cat [OPTIONS] [FILE]...\n\n")
 		fmt.Fprintf(os.Stderr, "Concatenate FILE(s) to standard output.\n\n")
 		fmt.Fprintf(os.Stderr, "With no FILE, or when FILE is -, read standard input.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 	}
-	flag.Parse()
+	fs.Parse(args)
 
 	if *showVersion {
 		fmt.Printf("cat (AULinux coreutils) %s\n", version)
@@ -42,7 +51,7 @@ func main() {
 		*showNumbers = false
 	}
 
-	files := flag.Args()
+	files := fs.Args()
 	if len(files) == 0 {
 		files = []string{"-"}
 	}
@@ -55,7 +64,9 @@ func main() {
 		}
 	}
 
-	os.Exit(exitCode)
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 func catFile(path string) error {

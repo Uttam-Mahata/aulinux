@@ -1,4 +1,4 @@
-package main
+package useradd
 
 import (
 	"bufio"
@@ -10,13 +10,13 @@ import (
 
 const passwdFile = "/etc/passwd"
 
-func main() {
-	if len(os.Args) < 2 {
+func Run(args []string) {
+	if len(args) < 1 {
 		fmt.Println("Usage: useradd <username>")
 		os.Exit(1)
 	}
 
-	username := os.Args[1]
+	username := args[0]
 
 	// Check if user exists
 	if userExists(username) {

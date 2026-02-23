@@ -1,6 +1,6 @@
-// Package main implements the echo command for AULinux.
+// Package echo implements the echo command for AULinux.
 // Displays a line of text.
-package main
+package echo
 
 import (
 	"flag"
@@ -12,32 +12,38 @@ import (
 const version = "1.0.0"
 
 var (
-	noNewline      = flag.Bool("n", false, "do not output trailing newline")
-	enableEscapes  = flag.Bool("e", false, "enable interpretation of backslash escapes")
-	disableEscapes = flag.Bool("E", false, "disable interpretation of backslash escapes (default)")
-	showVersion    = flag.Bool("version", false, "show version")
+	noNewline      *bool
+	enableEscapes  *bool
+	disableEscapes *bool
+	showVersion    *bool
 )
 
-func main() {
-	flag.Usage = func() {
+func Run(args []string) {
+	fs := flag.NewFlagSet("echo", flag.ExitOnError)
+	noNewline = fs.Bool("n", false, "do not output trailing newline")
+	enableEscapes = fs.Bool("e", false, "enable interpretation of backslash escapes")
+	disableEscapes = fs.Bool("E", false, "disable interpretation of backslash escapes (default)")
+	showVersion = fs.Bool("version", false, "show version")
+
+	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: echo [OPTIONS] [STRING]...\n\n")
 		fmt.Fprintf(os.Stderr, "Display a line of text.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nEscape sequences (with -e):\n")
 		fmt.Fprintf(os.Stderr, "  \\\\    backslash\n")
 		fmt.Fprintf(os.Stderr, "  \\n    new line\n")
 		fmt.Fprintf(os.Stderr, "  \\t    horizontal tab\n")
 		fmt.Fprintf(os.Stderr, "  \\r    carriage return\n")
 	}
-	flag.Parse()
+	fs.Parse(args)
 
 	if *showVersion {
 		fmt.Printf("echo (AULinux coreutils) %s\n", version)
 		os.Exit(0)
 	}
 
-	output := strings.Join(flag.Args(), " ")
+	output := strings.Join(fs.Args(), " ")
 
 	if *enableEscapes {
 		output = processEscapes(output)

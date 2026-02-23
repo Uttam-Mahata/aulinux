@@ -1,4 +1,4 @@
-package main
+package ip
 
 import (
 	"fmt"
@@ -21,26 +21,31 @@ type ifreq struct {
 	_pad  [22]byte
 }
 
-func main() {
-	if len(os.Args) < 4 {
+func Run(args []string) {
+	// Original: os.Args[1] is the first argument after command name.
+	// Here: args[0] is the first argument after command name.
+	// Original check: len(os.Args) < 4 (cmd, link, set, dev)
+	// New check: len(args) < 3 (link, set, dev)
+
+	if len(args) < 3 {
 		printUsage()
 		os.Exit(1)
 	}
 
-	if os.Args[1] != "link" || os.Args[2] != "set" {
+	if args[0] != "link" || args[1] != "set" {
 		printUsage()
 		os.Exit(1)
 	}
 
-	ifName := os.Args[3]
+	ifName := args[2]
 	if len(ifName) >= 16 {
 		fmt.Fprintf(os.Stderr, "Interface name too long\n")
 		os.Exit(1)
 	}
 
 	action := ""
-	if len(os.Args) >= 5 {
-		action = os.Args[4]
+	if len(args) >= 4 {
+		action = args[3]
 	}
 
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)

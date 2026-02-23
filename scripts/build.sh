@@ -62,22 +62,41 @@ build_init() {
     success "Init system built"
 }
 
-# Build shell
+# Build shell (Wrapper for utils since shell is now integrated)
 build_shell() {
-    info "Building shell (aush)..."
-    cd "$PROJECT_ROOT/shell"
-    mkdir -p "$BUILD_DIR/shell"
-    go build -o "$BUILD_DIR/shell/aush" .
-    success "Shell built"
+    info "Building shell (integrated into utils)..."
+    build_utils
 }
 
-# Build utilities
+# Build utilities (Multicall Binary)
 build_utils() {
-    info "Building utilities..."
-    cd "$PROJECT_ROOT/utils"
+    info "Building utilities (Multicall Binary)..."
+
+    # Ensure build directory exists
     mkdir -p "$BUILD_DIR/utils"
-    go build -o "$BUILD_DIR/utils/" ./cmd/...
-    success "Utilities built: $(ls "$BUILD_DIR/utils" | tr '\n' ' ')"
+
+    # Build from root to pick up go.mod
+    cd "$PROJECT_ROOT"
+
+    info "Compiling auutils..."
+    go build -ldflags="-s -w -buildid=" -trimpath -o "$BUILD_DIR/utils/auutils" utils/main.go
+
+    # Compression (Optional)
+    if command -v upx >/dev/null; then
+        info "Compressing binary with UPX..."
+        upx --best --lzma "$BUILD_DIR/utils/auutils"
+    else
+        warn "UPX not found, skipping compression."
+    fi
+
+    # Create Link Farm
+    local UTILS=("ls" "cat" "cp" "mv" "mkdir" "rm" "chmod" "echo" "pwd" "ps" "ip" "useradd" "groupadd" "aubuild" "aush" "sh")
+    info "Creating symlinks..."
+    for tool in "${UTILS[@]}"; do
+        ln -sf auutils "$BUILD_DIR/utils/$tool"
+    done
+
+    success "Utilities built and linked."
 }
 
 # Build package manager
@@ -106,7 +125,7 @@ build_all() {
     mkdir -p "$BUILD_DIR"
     
     build_init
-    build_shell
+    # build_shell is covered by build_utils now
     build_utils
     build_pkgmanager
     build_kernel
@@ -126,7 +145,7 @@ show_help() {
     echo "  all        Build all components (default)"
     echo "  kernel     Build kernel modules only"
     echo "  init       Build init system only"
-    echo "  shell      Build shell only"
+    echo "  shell      Build shell only (via utils)"
     echo "  utils      Build utilities only"
     echo "  pkgmanager Build package manager only"
     echo "  clean      Clean all build artifacts"

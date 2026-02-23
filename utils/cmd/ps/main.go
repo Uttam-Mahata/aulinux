@@ -1,4 +1,4 @@
-package main
+package ps
 
 import (
 	"fmt"
@@ -74,7 +74,7 @@ func scanProc(root string) ([]Process, error) {
 	return processes, nil
 }
 
-func main() {
+func Run(args []string) {
 	processes, err := scanProc("/proc")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error scanning /proc: %v\n", err)

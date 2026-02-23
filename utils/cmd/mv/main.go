@@ -1,6 +1,6 @@
-// Package main implements the mv command for AULinux.
+// Package mv implements the mv command for AULinux.
 // Moves (renames) files.
-package main
+package mv
 
 import (
 	"flag"
@@ -15,36 +15,43 @@ import (
 const version = "1.0.0"
 
 var (
-	force       = flag.Bool("f", false, "do not prompt before overwriting")
-	interactive = flag.Bool("i", false, "prompt before overwrite")
-	verbose     = flag.Bool("v", false, "explain what is being done")
-	noClobber   = flag.Bool("n", false, "do not overwrite an existing file")
-	showVersion = flag.Bool("version", false, "show version")
+	force       *bool
+	interactive *bool
+	verbose     *bool
+	noClobber   *bool
+	showVersion *bool
 )
 
-func main() {
-	flag.Usage = func() {
+func Run(args []string) {
+	fs := flag.NewFlagSet("mv", flag.ExitOnError)
+	force = fs.Bool("f", false, "do not prompt before overwriting")
+	interactive = fs.Bool("i", false, "prompt before overwrite")
+	verbose = fs.Bool("v", false, "explain what is being done")
+	noClobber = fs.Bool("n", false, "do not overwrite an existing file")
+	showVersion = fs.Bool("version", false, "show version")
+
+	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: mv [OPTIONS] SOURCE DEST\n")
 		fmt.Fprintf(os.Stderr, "       mv [OPTIONS] SOURCE... DIRECTORY\n\n")
 		fmt.Fprintf(os.Stderr, "Rename SOURCE to DEST, or move SOURCE(s) to DIRECTORY.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 	}
-	flag.Parse()
+	fs.Parse(args)
 
 	if *showVersion {
 		fmt.Printf("mv (AULinux coreutils) %s\n", version)
 		os.Exit(0)
 	}
 
-	args := flag.Args()
-	if len(args) < 2 {
+	cliArgs := fs.Args()
+	if len(cliArgs) < 2 {
 		fmt.Fprintln(os.Stderr, "mv: missing file operand")
 		os.Exit(1)
 	}
 
-	dest := args[len(args)-1]
-	sources := args[:len(args)-1]
+	dest := cliArgs[len(cliArgs)-1]
+	sources := cliArgs[:len(cliArgs)-1]
 
 	destInfo, destErr := os.Stat(dest)
 	destIsDir := destErr == nil && destInfo.IsDir()
@@ -68,7 +75,9 @@ func main() {
 		}
 	}
 
-	os.Exit(exitCode)
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 func movePath(src, dest string) error {

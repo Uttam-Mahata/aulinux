@@ -531,6 +531,10 @@ int main(int argc, char *argv[])
 
     my_pid = getpid();
 
+    /* Set Go runtime environment variables for optimization */
+    setenv("GOGC", "50", 1);        // Trigger GC more frequently
+    setenv("GOMEMLIMIT", "512MiB", 1); // Soft limit for Go memory usage
+
     /* Print banner */
     fprintf(stderr, "\n");
     fprintf(stderr, "  ╔═══════════════════════════════════════╗\n");

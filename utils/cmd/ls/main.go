@@ -1,6 +1,6 @@
-// Package main implements the ls command for AULinux.
+// Package ls implements the ls command for AULinux.
 // Lists directory contents with color and detailed output support.
-package main
+package ls
 
 import (
 	"flag"
@@ -20,15 +20,15 @@ import (
 const version = "1.0.0"
 
 var (
-	longFormat  = flag.Bool("l", false, "use long listing format")
-	showAll     = flag.Bool("a", false, "show hidden files (starting with .)")
-	showAlmost  = flag.Bool("A", false, "show hidden files except . and ..")
-	humanSize   = flag.Bool("h", false, "human-readable sizes (with -l)")
-	sortByTime  = flag.Bool("t", false, "sort by modification time")
-	sortBySize  = flag.Bool("S", false, "sort by file size")
-	reverseSort = flag.Bool("r", false, "reverse sort order")
-	noColor     = flag.Bool("no-color", false, "disable color output")
-	showVersion = flag.Bool("version", false, "show version")
+	longFormat  *bool
+	showAll     *bool
+	showAlmost  *bool
+	humanSize   *bool
+	sortByTime  *bool
+	sortBySize  *bool
+	reverseSort *bool
+	noColor     *bool
+	showVersion *bool
 )
 
 // ANSI color codes
@@ -41,14 +41,25 @@ const (
 	colorImage   = "\033[1;35m" // bold magenta
 )
 
-func main() {
-	flag.Usage = func() {
+func Run(args []string) {
+	fs := flag.NewFlagSet("ls", flag.ExitOnError)
+	longFormat = fs.Bool("l", false, "use long listing format")
+	showAll = fs.Bool("a", false, "show hidden files (starting with .)")
+	showAlmost = fs.Bool("A", false, "show hidden files except . and ..")
+	humanSize = fs.Bool("h", false, "human-readable sizes (with -l)")
+	sortByTime = fs.Bool("t", false, "sort by modification time")
+	sortBySize = fs.Bool("S", false, "sort by file size")
+	reverseSort = fs.Bool("r", false, "reverse sort order")
+	noColor = fs.Bool("no-color", false, "disable color output")
+	showVersion = fs.Bool("version", false, "show version")
+
+	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: ls [OPTIONS] [FILE]...\n\n")
 		fmt.Fprintf(os.Stderr, "List directory contents.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 	}
-	flag.Parse()
+	fs.Parse(args)
 
 	if *showVersion {
 		fmt.Printf("ls (AULinux coreutils) %s\n", version)
@@ -56,7 +67,7 @@ func main() {
 	}
 
 	// Determine paths to list
-	paths := flag.Args()
+	paths := fs.Args()
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
@@ -80,7 +91,9 @@ func main() {
 		}
 	}
 
-	os.Exit(exitCode)
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 func isTerminal(f *os.File) bool {

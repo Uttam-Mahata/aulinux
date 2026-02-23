@@ -1,6 +1,6 @@
-// Package main implements the cp command for AULinux.
+// Package cp implements the cp command for AULinux.
 // Copies files and directories.
-package main
+package cp
 
 import (
 	"flag"
@@ -13,25 +13,35 @@ import (
 const version = "1.0.0"
 
 var (
-	recursive   = flag.Bool("r", false, "copy directories recursively")
-	recursiveR  = flag.Bool("R", false, "copy directories recursively")
-	force       = flag.Bool("f", false, "overwrite without prompting")
-	interactive = flag.Bool("i", false, "prompt before overwrite")
-	verbose     = flag.Bool("v", false, "explain what is being done")
-	preserve    = flag.Bool("p", false, "preserve mode, ownership and timestamps")
-	noClobber   = flag.Bool("n", false, "do not overwrite existing file")
-	showVersion = flag.Bool("version", false, "show version")
+	recursive   *bool
+	recursiveR  *bool
+	force       *bool
+	interactive *bool
+	verbose     *bool
+	preserve    *bool
+	noClobber   *bool
+	showVersion *bool
 )
 
-func main() {
-	flag.Usage = func() {
+func Run(args []string) {
+	fs := flag.NewFlagSet("cp", flag.ExitOnError)
+	recursive = fs.Bool("r", false, "copy directories recursively")
+	recursiveR = fs.Bool("R", false, "copy directories recursively")
+	force = fs.Bool("f", false, "overwrite without prompting")
+	interactive = fs.Bool("i", false, "prompt before overwrite")
+	verbose = fs.Bool("v", false, "explain what is being done")
+	preserve = fs.Bool("p", false, "preserve mode, ownership and timestamps")
+	noClobber = fs.Bool("n", false, "do not overwrite existing file")
+	showVersion = fs.Bool("version", false, "show version")
+
+	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: cp [OPTIONS] SOURCE DEST\n")
 		fmt.Fprintf(os.Stderr, "       cp [OPTIONS] SOURCE... DIRECTORY\n\n")
 		fmt.Fprintf(os.Stderr, "Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 	}
-	flag.Parse()
+	fs.Parse(args)
 
 	if *showVersion {
 		fmt.Printf("cp (AULinux coreutils) %s\n", version)
@@ -43,14 +53,14 @@ func main() {
 		*recursive = true
 	}
 
-	args := flag.Args()
-	if len(args) < 2 {
+	cliArgs := fs.Args()
+	if len(cliArgs) < 2 {
 		fmt.Fprintln(os.Stderr, "cp: missing file operand")
 		os.Exit(1)
 	}
 
-	dest := args[len(args)-1]
-	sources := args[:len(args)-1]
+	dest := cliArgs[len(cliArgs)-1]
+	sources := cliArgs[:len(cliArgs)-1]
 
 	destInfo, destErr := os.Stat(dest)
 	destIsDir := destErr == nil && destInfo.IsDir()
@@ -74,7 +84,9 @@ func main() {
 		}
 	}
 
-	os.Exit(exitCode)
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 func copyPath(src, dest string) error {

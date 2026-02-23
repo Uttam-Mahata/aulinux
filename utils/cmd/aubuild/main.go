@@ -1,4 +1,4 @@
-package main
+package aubuild
 
 import (
 	"archive/tar"
@@ -27,19 +27,20 @@ type Package struct {
 	License       string   `json:"license,omitempty"`
 }
 
-func main() {
-	srcDir := flag.String("src", "", "Source directory containing package files")
-	outDir := flag.String("out", ".", "Output directory for the package")
-	name := flag.String("name", "", "Package name")
-	version := flag.String("version", "", "Package version")
-	desc := flag.String("desc", "", "Package description")
-	arch := flag.String("arch", "x86_64", "Architecture")
+func Run(args []string) {
+	fs := flag.NewFlagSet("aubuild", flag.ExitOnError)
+	srcDir := fs.String("src", "", "Source directory containing package files")
+	outDir := fs.String("out", ".", "Output directory for the package")
+	name := fs.String("name", "", "Package name")
+	version := fs.String("version", "", "Package version")
+	desc := fs.String("desc", "", "Package description")
+	arch := fs.String("arch", "x86_64", "Architecture")
 
-	flag.Parse()
+	fs.Parse(args)
 
 	if *srcDir == "" || *name == "" || *version == "" {
 		fmt.Println("Usage: aubuild -src <dir> -name <name> -version <version> [options]")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 		os.Exit(1)
 	}
 

@@ -1,6 +1,6 @@
-// Package main implements the pwd command for AULinux.
+// Package pwd implements the pwd command for AULinux.
 // Prints the current working directory.
-package main
+package pwd
 
 import (
 	"flag"
@@ -11,19 +11,24 @@ import (
 const version = "1.0.0"
 
 var (
-	logical     = flag.Bool("L", false, "use PWD from environment, even if it contains symlinks")
-	physical    = flag.Bool("P", false, "avoid all symlinks (default)")
-	showVersion = flag.Bool("version", false, "show version")
+	logical     *bool
+	physical    *bool
+	showVersion *bool
 )
 
-func main() {
-	flag.Usage = func() {
+func Run(args []string) {
+	fs := flag.NewFlagSet("pwd", flag.ExitOnError)
+	logical = fs.Bool("L", false, "use PWD from environment, even if it contains symlinks")
+	physical = fs.Bool("P", false, "avoid all symlinks (default)")
+	showVersion = fs.Bool("version", false, "show version")
+
+	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: pwd [OPTIONS]\n\n")
 		fmt.Fprintf(os.Stderr, "Print the full filename of the current working directory.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 	}
-	flag.Parse()
+	fs.Parse(args)
 
 	if *showVersion {
 		fmt.Printf("pwd (AULinux coreutils) %s\n", version)

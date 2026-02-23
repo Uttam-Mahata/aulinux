@@ -1,6 +1,6 @@
-// Package main implements aush - the Absolutely Unique Shell for AULinux.
+// Package shell implements aush - the Absolutely Unique Shell for AULinux.
 // A modern, user-friendly shell with essential features.
-package main
+package shell
 
 import (
 	"bufio"
@@ -90,18 +90,18 @@ func init() {
 	}
 }
 
-func main() {
+func Run(args []string) {
 	shell := NewShell()
 
 	// Parse arguments
-	for i := 1; i < len(os.Args); i++ {
-		arg := os.Args[i]
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch arg {
 		case "-l", "--login":
 			shell.loginShell = true
 		case "-c":
-			if i+1 < len(os.Args) {
-				os.Exit(shell.ExecuteCommand(os.Args[i+1]))
+			if i+1 < len(args) {
+				os.Exit(shell.ExecuteCommand(args[i+1]))
 			}
 			fmt.Fprintln(os.Stderr, "aush: -c requires an argument")
 			os.Exit(1)
@@ -115,7 +115,7 @@ func main() {
 	}
 
 	// Run shell
-	os.Exit(shell.Run())
+	os.Exit(shell.Start())
 }
 
 // NewShell creates a new shell instance
@@ -146,8 +146,8 @@ func NewShell() *Shell {
 	return s
 }
 
-// Run starts the main shell loop
-func (s *Shell) Run() int {
+// Start starts the main shell loop
+func (s *Shell) Start() int {
 	// Setup signal handlers
 	s.setupSignals()
 

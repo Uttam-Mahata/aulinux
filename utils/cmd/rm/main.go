@@ -1,34 +1,42 @@
-// Package main implements the rm command for AULinux.
+// Package rm implements the rm command for AULinux.
 // Removes files and directories.
-package main
+package rm
 
 import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 const version = "1.0.0"
 
 var (
-	force       = flag.Bool("f", false, "ignore nonexistent files, never prompt")
-	interactive = flag.Bool("i", false, "prompt before every removal")
-	recursive   = flag.Bool("r", false, "remove directories and their contents recursively")
-	recursiveR  = flag.Bool("R", false, "remove directories and their contents recursively")
-	verbose     = flag.Bool("v", false, "explain what is being done")
-	dir         = flag.Bool("d", false, "remove empty directories")
-	showVersion = flag.Bool("version", false, "show version")
+	force       *bool
+	interactive *bool
+	recursive   *bool
+	recursiveR  *bool
+	verbose     *bool
+	dir         *bool
+	showVersion *bool
 )
 
-func main() {
-	flag.Usage = func() {
+func Run(args []string) {
+	fs := flag.NewFlagSet("rm", flag.ExitOnError)
+	force = fs.Bool("f", false, "ignore nonexistent files, never prompt")
+	interactive = fs.Bool("i", false, "prompt before every removal")
+	recursive = fs.Bool("r", false, "remove directories and their contents recursively")
+	recursiveR = fs.Bool("R", false, "remove directories and their contents recursively")
+	verbose = fs.Bool("v", false, "explain what is being done")
+	dir = fs.Bool("d", false, "remove empty directories")
+	showVersion = fs.Bool("version", false, "show version")
+
+	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: rm [OPTIONS] FILE...\n\n")
 		fmt.Fprintf(os.Stderr, "Remove (unlink) the FILE(s).\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
-		flag.PrintDefaults()
+		fs.PrintDefaults()
 	}
-	flag.Parse()
+	fs.Parse(args)
 
 	if *showVersion {
 		fmt.Printf("rm (AULinux coreutils) %s\n", version)
@@ -40,13 +48,13 @@ func main() {
 		*recursive = true
 	}
 
-	if flag.NArg() == 0 {
+	if fs.NArg() == 0 {
 		fmt.Fprintln(os.Stderr, "rm: missing operand")
 		os.Exit(1)
 	}
 
 	exitCode := 0
-	for _, path := range flag.Args() {
+	for _, path := range fs.Args() {
 		if err := remove(path); err != nil {
 			if !*force {
 				fmt.Fprintf(os.Stderr, "rm: %v\n", err)
@@ -55,7 +63,9 @@ func main() {
 		}
 	}
 
-	os.Exit(exitCode)
+	if exitCode != 0 {
+		os.Exit(exitCode)
+	}
 }
 
 func remove(path string) error {
@@ -114,12 +124,6 @@ func remove(path string) error {
 }
 
 func removeRecursive(path string) error {
-	return filepath.Walk(path, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		return nil
-	})
 	// Use RemoveAll for simplicity
 	return os.RemoveAll(path)
 }

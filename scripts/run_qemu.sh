@@ -84,7 +84,7 @@ if [ ! -f "$KERNEL_FILE" ]; then
         if [ ! -f "$KERNEL_FILE" ]; then
             info "Falling back to downloading minimal Alpine virtualized kernel..."
             _alpine_arch="$(uname -m | sed 's/armv7l/armv7/')"
-            if curl -Lo "$KERNEL_FILE" "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/${_alpine_arch}/netboot/vmlinuz-virt"; then
+            if curl -Lo "$KERNEL_FILE" "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/${_alpine_arch}/netboot/vmlinuz-virt"; then
                 success "Successfully downloaded minimal Alpine kernel to $KERNEL_FILE"
             else
                 error "Failed to obtain kernel through all available methods."

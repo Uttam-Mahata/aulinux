@@ -130,12 +130,19 @@ jobs:
       # ── Assemble rootfs ─────────────────────────────────────────────────────
       - name: Download Alpine minirootfs [${{ matrix.arch }}]
         run: |
-          # Resolve the exact patch release from Alpine's authoritative YAML
+          # Resolve the exact patch release by scanning filenames in the YAML
+          # (field order in latest-releases.yaml is alphabetical, so version: comes
+          #  before flavor:; matching on the filename is order-independent)
           RELEASES_YAML="https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/latest-releases.yaml"
           ALPINE_RELEASE=$(curl -fSL "$RELEASES_YAML" \
-            | grep -A5 'flavor: alpine-minirootfs' \
-            | grep 'version:' | head -1 \
-            | awk '{print $2}')
+            | grep -o 'alpine-minirootfs-[0-9][0-9.]*-' \
+            | head -1 \
+            | sed 's/alpine-minirootfs-//;s/-$//')
+          if [ -z "$ALPINE_RELEASE" ]; then
+            echo "ERROR: could not parse minirootfs version from $RELEASES_YAML" >&2
+            curl -fSL "$RELEASES_YAML" | head -30 >&2
+            exit 1
+          fi
           echo "Resolved Alpine ${{ env.ALPINE_VERSION }} / ${{ matrix.alpine_arch }} minirootfs: $ALPINE_RELEASE"
           curl -fSL \
             "https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/alpine-minirootfs-${ALPINE_RELEASE}-${{ matrix.alpine_arch }}.tar.gz" \

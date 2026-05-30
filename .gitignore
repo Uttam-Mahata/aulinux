@@ -53,3 +53,17 @@ temp/
 
 # Shell history
 .aush_history
+
+# Generated root filesystem (large binary)
+rootfs/
+
+# Debian/RPM packages
+*.deb
+*.rpm
+
+# LaTeX build artifacts
+book/*.aux
+book/*.log
+book/*.out
+book/*.toc
+book/*.pdf

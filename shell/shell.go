@@ -5,6 +5,7 @@ package shell
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -93,6 +94,8 @@ func init() {
 func Run(args []string) {
 	shell := NewShell()
 
+	scriptFile := ""
+
 	// Parse arguments
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -111,12 +114,21 @@ func Run(args []string) {
 		case "--help":
 			printHelp()
 			os.Exit(0)
+		default:
+			if !strings.HasPrefix(arg, "-") && scriptFile == "" {
+				scriptFile = arg
+			}
 		}
+	}
+
+	if scriptFile != "" {
+		os.Exit(shell.RunScript(scriptFile))
 	}
 
 	// Run shell
 	os.Exit(shell.Start())
 }
+
 
 // NewShell creates a new shell instance
 func NewShell() *Shell {
@@ -138,6 +150,20 @@ func NewShell() *Shell {
 		s.hostname = h
 	} else {
 		s.hostname = "localhost"
+	}
+
+	// Ensure essential environment variables are set
+	if os.Getenv("PATH") == "" {
+		os.Setenv("PATH", "/bin:/sbin:/usr/bin:/usr/sbin")
+	}
+	if os.Getenv("HOME") == "" {
+		os.Setenv("HOME", "/root")
+	}
+	if os.Getenv("USER") == "" {
+		os.Setenv("USER", "root")
+	}
+	if os.Getenv("SHELL") == "" {
+		os.Setenv("SHELL", "/bin/aush")
 	}
 
 	// Load history
@@ -163,7 +189,7 @@ func (s *Shell) Start() int {
 		// Read input
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			if err.Error() == "EOF" {
+			if err == io.EOF {
 				fmt.Println()
 				break
 			}
@@ -187,6 +213,42 @@ func (s *Shell) Start() int {
 	s.saveHistory()
 
 	return s.exitCode
+}
+
+// RunScript opens a shell script file, reads it line by line, and executes it.
+func (s *Shell) RunScript(filename string) int {
+	file, err := os.Open(filename)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aush: %v\n", err)
+		return 1
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	lastExit := 0
+	exitOnError := false
+outer:
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		// Handle set -e
+		if line == "set -e" {
+			exitOnError = true
+			continue
+		}
+		lastExit = s.ExecuteCommand(line)
+		if exitOnError && lastExit != 0 {
+			break outer
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "aush: error reading script %s: %v\n", filename, err)
+		return 1
+	}
+	return lastExit
 }
 
 // ExecuteCommand parses and executes a command line
@@ -242,27 +304,29 @@ func (s *Shell) ExecuteCommand(line string) int {
 	return s.executeExternal(args, stdin, stdout, stderr, background)
 }
 
-// parseCommand splits a command line into arguments
+// parseCommand splits a command line into arguments.
+// quoteChar == 0 means not inside a quoted string; non-zero holds the opening quote rune.
 func (s *Shell) parseCommand(line string) []string {
 	var args []string
 	var current strings.Builder
-	inQuote := false
-	quoteChar := byte(0)
+	var quoteChar rune // 0 = not in quote; '"' or '\'' = in that quote type
 
-	for i := 0; i < len(line); i++ {
-		ch := line[i]
+	runes := []rune(line)
+	for i := 0; i < len(runes); i++ {
+		c := runes[i]
 
-		if inQuote {
-			if ch == quoteChar {
-				inQuote = false
+		if quoteChar != 0 {
+			// Inside a quoted section – end on matching close quote
+			if c == quoteChar {
+				quoteChar = 0
 			} else {
-				current.WriteByte(ch)
+				current.WriteRune(c)
 			}
 		} else {
-			switch ch {
+			switch c {
 			case '"', '\'':
-				inQuote = true
-				quoteChar = ch
+				// Start a new quoted section
+				quoteChar = c
 			case ' ', '\t':
 				if current.Len() > 0 {
 					args = append(args, current.String())
@@ -275,12 +339,12 @@ func (s *Shell) parseCommand(line string) []string {
 				}
 				args = append(args, "&")
 			case '\\':
-				if i+1 < len(line) {
+				if i+1 < len(runes) {
 					i++
-					current.WriteByte(line[i])
+					current.WriteRune(runes[i])
 				}
 			default:
-				current.WriteByte(ch)
+				current.WriteRune(c)
 			}
 		}
 	}
@@ -561,9 +625,13 @@ func (s *Shell) printPrompt() {
 	dirColor := "\033[1;36m"   // cyan
 	reset := "\033[0m"
 
-	username := "user"
-	if s.user != nil {
-		username = s.user.Username
+	username := os.Getenv("USER")
+	if username == "" {
+		if s.user != nil {
+			username = s.user.Username
+		} else {
+			username = "user"
+		}
 	}
 
 	fmt.Printf("%s%s%s@%s%s%s:%s%s%s%s ", 

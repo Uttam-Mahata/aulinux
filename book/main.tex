@@ -1,0 +1,200 @@
+\documentclass[11pt, a4paper, openany]{book}
+
+% ======================================================================
+%  AULinux: The Architecture and Design of a Polyglot Operating System
+%  Master document — preamble defines the shared visual language.
+%  Compile with: pdflatex main && pdflatex main  (run twice for TOC)
+% ======================================================================
+
+% ---- Encoding & fonts -------------------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{textcomp}
+\usepackage[strings]{underscore} % let _ print literally in text/\texttt; math subscripts still work
+
+% ---- Geometry & layout ------------------------------------------------
+\usepackage[a4paper, margin=1in, headheight=15pt]{geometry}
+\usepackage{setspace}
+\onehalfspacing
+
+% ---- Colour palette ---------------------------------------------------
+\usepackage{xcolor}
+\definecolor{auprimary}{HTML}{1F3A5F}   % deep slate-blue (brand)
+\definecolor{auaccent}{HTML}{E07B39}    % warm amber accent
+\definecolor{auteal}{HTML}{2A9D8F}      % teal (Go)
+\definecolor{aurust}{HTML}{B7410E}      % rust-orange (Rust)
+\definecolor{aukernel}{HTML}{6A4C93}    % violet (kernel/C)
+\definecolor{aulight}{HTML}{F4F6F8}     % near-white panel
+\definecolor{aurule}{HTML}{C9D3DD}      % soft rule
+\definecolor{codegreen}{HTML}{2E7D32}
+\definecolor{codegray}{HTML}{8A8A8A}
+\definecolor{codepurple}{HTML}{7B1FA2}
+\definecolor{codeblue}{HTML}{1565C0}
+\definecolor{backcolour}{HTML}{F7F8FA}
+
+% ---- Graphics & boxes -------------------------------------------------
+\usepackage{graphicx}
+\usepackage[most]{tcolorbox}
+\usepackage{listings}
+\usepackage{enumitem}
+\setlist{itemsep=2pt, topsep=4pt}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+
+% ---- Headers & footers ------------------------------------------------
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+\fancyhead[L]{\small\textsc{\nouppercase{\leftmark}}}
+\fancyhead[R]{\small\textsc{AULinux}}
+\fancyfoot[C]{\thepage}
+\fancypagestyle{plain}{\fancyhf{}\fancyfoot[C]{\thepage}\renewcommand{\headrulewidth}{0pt}}
+
+% ---- Chapter & section styling ---------------------------------------
+\usepackage{titlesec}
+\titleformat{\chapter}[display]
+  {\normalfont\sffamily\bfseries\color{auprimary}}
+  {\filright\Large\color{auaccent}\MakeUppercase{\chaptertitlename}\ \Huge\thechapter}
+  {0.6ex}
+  {\titlerule[1.2pt]\vspace{1ex}\filright\Huge}
+  [\vspace{0.4ex}{\color{aurule}\titlerule[1.2pt]}]
+\titlespacing*{\chapter}{0pt}{10pt}{28pt}
+
+\titleformat{\section}
+  {\normalfont\sffamily\Large\bfseries\color{auprimary}}{\thesection}{0.6em}{}
+\titleformat{\subsection}
+  {\normalfont\sffamily\large\bfseries\color{auprimary!85}}{\thesubsection}{0.6em}{}
+
+% ---- Listings: shared base + per-language flavours -------------------
+\lstdefinestyle{aubase}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen}\itshape,
+    keywordstyle=\color{codeblue}\bfseries,
+    keywordstyle=[2]\color{aurust}\bfseries,
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\small,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    keepspaces=true,
+    numbers=left,
+    numbersep=8pt,
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=4,
+    frame=lines,
+    rulecolor=\color{aurule},
+    framexleftmargin=4pt,
+    xleftmargin=10pt,
+    aboveskip=12pt,
+    belowskip=8pt,
+}
+\lstset{style=aubase}
+
+% Go language definition (not built into listings)
+\lstdefinelanguage{Go}{
+  keywords={break,default,func,interface,select,case,defer,go,map,struct,chan,else,goto,package,switch,const,fallthrough,if,range,type,continue,for,import,return,var},
+  keywords=[2]{nil,true,false,iota,append,cap,close,complex,copy,delete,imag,len,make,new,panic,print,println,real,recover,error,string,int,int8,int16,int32,int64,uint,uint8,uint16,uint32,uint64,byte,rune,float32,float64,bool},
+  sensitive=true,
+  comment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+  morestring=[b]`,
+}
+
+% Rust language definition (not built into listings)
+\lstdefinelanguage{Rust}{
+  keywords={as,async,await,break,const,continue,crate,dyn,else,enum,extern,false,fn,for,if,impl,in,let,loop,match,mod,move,mut,pub,ref,return,self,Self,static,struct,super,trait,true,type,unsafe,use,where,while},
+  keywords=[2]{Option,Result,Some,None,Ok,Err,Vec,String,Box,Rc,Arc,HashMap,Self,bool,u8,u16,u32,u64,usize,i8,i16,i32,i64,isize,f32,f64,str,char},
+  sensitive=true,
+  comment=[l]{//},
+  morecomment=[l]{///},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+}
+
+% ---- Callout boxes (tcolorbox) ---------------------------------------
+\newtcolorbox{infobox}[1][]{
+  enhanced, breakable, colback=auteal!6, colframe=auteal,
+  boxrule=0.6pt, arc=2pt, left=8pt, right=8pt, top=6pt, bottom=6pt,
+  fonttitle=\bfseries\sffamily\color{white},
+  coltitle=white, attach boxed title to top left={xshift=8pt,yshift=-2pt},
+  boxed title style={colback=auteal, arc=1pt}, title={#1}}
+
+\newtcolorbox{notebox}[1][Note]{
+  enhanced, breakable, colback=auprimary!5, colframe=auprimary,
+  boxrule=0.6pt, arc=2pt, left=8pt, right=8pt, top=6pt, bottom=6pt,
+  fonttitle=\bfseries\sffamily\color{white},
+  coltitle=white, attach boxed title to top left={xshift=8pt,yshift=-2pt},
+  boxed title style={colback=auprimary, arc=1pt}, title={#1}}
+
+\newtcolorbox{warnbox}[1][Caution]{
+  enhanced, breakable, colback=auaccent!8, colframe=auaccent,
+  boxrule=0.6pt, arc=2pt, left=8pt, right=8pt, top=6pt, bottom=6pt,
+  fonttitle=\bfseries\sffamily\color{white},
+  coltitle=white, attach boxed title to top left={xshift=8pt,yshift=-2pt},
+  boxed title style={colback=auaccent, arc=1pt}, title={#1}}
+
+% Inline filename / identifier helper
+\newcommand{\file}[1]{\texttt{\textcolor{auprimary}{#1}}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+% ---- Hyperref (load late) --------------------------------------------
+\usepackage[hidelinks]{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=auprimary,
+  citecolor=auteal,
+  urlcolor=auaccent,
+  pdftitle={AULinux: The Architecture and Design of a Polyglot Operating System},
+  pdfauthor={Uttam Mahata},
+}
+\usepackage{bookmark}
+
+% ======================================================================
+\begin{document}
+
+% ---- Custom title page -----------------------------------------------
+\begin{titlepage}
+\thispagestyle{empty}
+\centering
+\vspace*{\fill}
+{\color{aurule}\rule{\linewidth}{1.5pt}}\\[2.0em]
+{\sffamily\Huge\bfseries\color{auprimary} AULinux\par}
+\vspace{0.6em}
+{\sffamily\LARGE\color{auaccent} The Architecture \& Design of a\\ Polyglot Operating System\par}
+\vspace{1.2em}
+{\color{aurule}\rule{0.5\linewidth}{1pt}}\\[1.6em]
+{\large\itshape A technical deep-dive into a system forged from\par}
+{\large\itshape \textcolor{aukernel}{C}, \textcolor{auteal}{Go}, and \textcolor{aurust}{Rust}\par}
+\vspace{3.2em}
+{\Large\sffamily Uttam Mahata\par}
+\vspace{0.4em}
+{\large May 2026\par}
+\vspace*{\fill}
+{\color{aurule}\rule{\linewidth}{1.5pt}}
+\end{titlepage}
+
+\frontmatter
+\pagestyle{plain}
+\tableofcontents
+\cleardoublepage
+
+\mainmatter
+\pagestyle{fancy}
+
+\include{ch1_intro}
+\include{ch2_init}
+\include{ch3_kernel}
+\include{ch4_userland}
+\include{ch5_pkgmgr}
+\include{ch6_build}
+
+\end{document}

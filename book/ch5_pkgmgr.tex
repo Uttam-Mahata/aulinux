@@ -1,0 +1,628 @@
+\chapter{The Rust Package Manager: \texttt{aupkg}}
+\label{chap:pkgmgr}
+
+Every operating system needs a way to install, remove, and track software. In AULinux this responsibility falls to \file{aupkg}, a command-line package manager written entirely in Rust. Where the kernel-adjacent components of the system lean on C and the userland leans on Go, the package manager is the one place in AULinux where the work is genuinely dangerous: it copies files into system directories, deletes them again, extracts archives that may have been fetched over the network, and maintains an on-disk record of system state that must survive crashes. This is exactly the kind of program where Rust earns its keep.
+
+This chapter documents \file{aupkg} as it is actually implemented. The crate is small --- six source files totalling a few hundred lines --- but it is a complete, working tool with a real command-line interface, a serialised database, a configuration system, a fully recursive dependency resolver with cycle detection, a security-hardened archive-validation path, and a suite of unit tests. Where a feature is a stub or a placeholder, this chapter says so plainly rather than dressing it up.
+
+\section{Why Rust for a Package Manager}
+
+A package manager spends its life mutating shared, persistent state on the filesystem. Three classes of bug dominate this domain: use-after-free and memory corruption when juggling many in-flight package records; silent error swallowing when a download or extraction half-fails; and partial writes that leave the database corrupt after a crash. Rust attacks all three at the language level.
+
+\textbf{Ownership and borrowing.} The compiler tracks who owns each \code{Package} record and when it may be mutated. In \file{commands.rs} you can see this discipline shaping the code: before mutating the installed-package map, the install loop first \emph{clones} the available-package record out of the immutable database (\code{db.get\_available(\&pkg\_name).cloned()}), precisely because it cannot hold a shared borrow of \code{db} and a mutable borrow at the same time. The borrow checker turns a subtle aliasing question into a compile error.
+
+\textbf{\code{Result} and the \code{?} operator.} Rust has no exceptions. Every fallible operation returns a \code{Result<T, E>}, and the \code{?} operator propagates the error upward with a single character. The entire command dispatcher returns \code{Result<(), Box<dyn std::error::Error>>}, so any I/O failure --- a missing file, a malformed JSON blob, a failed \code{rename} --- bubbles cleanly up to \code{main}, which converts it into a non-zero exit code.
+
+\textbf{\code{serde} for the data model.} The package and configuration types derive \code{Serialize} and \code{Deserialize}, so the JSON on-disk format and the in-memory structs are kept in lockstep by the compiler. There is no hand-written parser to drift out of sync.
+
+\textbf{\code{clap} for the CLI.} The command-line surface is declared as Rust types with derive macros; \code{clap} generates parsing, help text, version output, and validation from the type definitions.
+
+\begin{infobox}[The core idea]
+\file{aupkg} treats the filesystem and the package database as resources to be manipulated under the supervision of the borrow checker, and treats every fallible step as a \code{Result} that must be explicitly handled or propagated. The result is a tool whose error paths are as visible as its happy path.
+\end{infobox}
+
+\section{CLI Architecture}
+
+The program's entry point is tiny. \file{main.rs} does nothing but parse arguments, run the command, and translate any error into an exit status.
+
+\begin{lstlisting}[language=Rust, caption={\file{main.rs} --- parse, execute, exit}]
+use clap::Parser;
+use aupkg::commands::{Cli, execute};
+
+fn main() {
+    let cli = Cli::parse();
+
+    if let Err(e) = execute(cli) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+\end{lstlisting}
+
+All real logic lives behind the library crate. \file{lib.rs} simply exposes the four modules that make up the tool:
+
+\begin{lstlisting}[language=Rust, caption={\file{lib.rs} --- the crate's module layout}]
+pub mod config;
+pub mod model;
+pub mod db;
+pub mod commands;
+\end{lstlisting}
+
+The command-line grammar is declared in \file{commands.rs} using \code{clap}'s derive API. The top-level \code{Cli} struct carries three global flags --- \code{--yes}, \code{--quiet}, and \code{--verbose} --- and a subcommand:
+
+\begin{lstlisting}[language=Rust, caption={\file{commands.rs} --- the top-level \code{Cli} parser}]
+#[derive(Parser)]
+#[command(name = "aupkg")]
+#[command(about = "AULinux Package Manager", long_about = None)]
+#[command(version = "1.0.0")]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+
+    #[arg(short, long, help = "Assume yes to all prompts")]
+    pub yes: bool,
+
+    #[arg(short, long, help = "Quiet mode")]
+    pub quiet: bool,
+
+    #[arg(short, long, help = "Verbose output")]
+    pub verbose: bool,
+}
+\end{lstlisting}
+
+The subcommands themselves are a single \code{enum}. Each variant becomes a verb on the command line, and \code{clap} attaches the short aliases and required-argument rules declared in the attributes:
+
+\begin{lstlisting}[language=Rust, caption={\file{commands.rs} --- the \code{Commands} subcommand enum}]
+#[derive(Subcommand)]
+pub enum Commands {
+    #[command(alias = "i", about = "Install packages")]
+    Install { #[arg(required = true)] packages: Vec<String> },
+    #[command(alias = "r", about = "Remove packages")]
+    Remove  { #[arg(required = true)] packages: Vec<String> },
+    #[command(alias = "u", about = "Update package database")]
+    Update,
+    #[command(about = "Upgrade installed packages")]
+    Upgrade,
+    #[command(alias = "s", about = "Search for packages")]
+    Search { #[arg(required = true)] keyword: String },
+    #[command(about = "Show package information")]
+    Info   { #[arg(required = true)] package: String },
+    #[command(alias = "l", about = "List installed packages")]
+    List,
+}
+\end{lstlisting}
+
+That enum is the authoritative list of what \file{aupkg} can do. Table~\ref{tab:aupkg-subcommands} summarises it.
+
+\begin{table}[h]
+\centering
+\caption{The subcommands defined by \file{aupkg} (from the \code{Commands} enum).}
+\label{tab:aupkg-subcommands}
+\begin{tabular}{@{}llp{6.4cm}@{}}
+\toprule
+\textbf{Subcommand} & \textbf{Alias / Args} & \textbf{Effect} \\
+\midrule
+\code{install} & \code{i} / one or more names & Resolve dependencies, fetch and extract each archive, record it in the local DB. \\
+\code{remove}  & \code{r} / one or more names & Delete each package's files (in reverse), drop it from the local DB. \\
+\code{update}  & \code{u} & Placeholder: prints status, does not yet fetch a remote index. \\
+\code{upgrade} & --- & Placeholder: prints ``System is up to date.'' \\
+\code{search}  & \code{s} / keyword & Case-insensitive substring match over available package names and descriptions. \\
+\code{info}    & --- / one name & Print full metadata for an installed or available package. \\
+\code{list}    & \code{l} & List every installed package and its version. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{notebox}[Global flags are parsed but not yet wired up]
+The \code{--yes}, \code{--quiet}, and \code{--verbose} flags are accepted by the parser, but the \code{execute} function never reads \code{cli.yes}, \code{cli.quiet}, or \code{cli.verbose}. They are part of the interface contract but currently have no behavioural effect; the tool never prompts, never suppresses output, and prints the same detail regardless.
+\end{notebox}
+
+The \code{execute} function in \file{commands.rs} is the dispatcher. It loads configuration and the two databases, warns (rather than aborts) if either database fails to load, then \code{match}es on the subcommand:
+
+\begin{lstlisting}[language=Rust, caption={\file{commands.rs} --- the dispatcher prologue}]
+pub fn execute(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let config = Config::load();
+    let mut db = PackageDatabase::new(config);
+
+    if let Err(e) = db.load_installed() {
+        eprintln!("Warning: Failed to load installed packages database: {}", e);
+    }
+    if let Err(e) = db.load_available() {
+        eprintln!("Warning: Failed to load available packages database: {}", e);
+    }
+
+    match cli.command {
+        Commands::Install { packages } => { /* ... */ }
+        Commands::Remove  { packages } => { /* ... */ }
+        // ...
+    }
+    Ok(())
+}
+\end{lstlisting}
+
+\section{The Data Model (\file{model.rs})}
+
+Everything \file{aupkg} knows about a piece of software is captured by one struct, \code{Package}, defined in \file{model.rs}. It derives \code{Serialize}, \code{Deserialize}, \code{Debug}, and \code{Clone}, so it round-trips to JSON and can be freely copied where ownership rules demand it.
+
+\begin{lstlisting}[language=Rust, caption={\file{model.rs} --- the \code{Package} struct}]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Package {
+    pub name: String,
+    pub version: String,
+    pub description: Option<String>,
+    pub maintainer: Option<String>,
+    pub architecture: Option<String>,
+    #[serde(default)]
+    pub installed_size: u64,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub optional_deps: Vec<String>,
+    #[serde(default)]
+    pub conflicts: Vec<String>,
+    #[serde(default)]
+    pub provides: Vec<String>,
+    pub url: Option<String>,
+    pub license: Option<String>,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
+    pub install_date: i64,
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+\end{lstlisting}
+
+Several design decisions are encoded in those attributes:
+
+\begin{itemize}
+  \item \textbf{\code{Option<String>} for optional metadata.} Fields like \code{description}, \code{maintainer}, \code{architecture}, \code{url}, and \code{license} are genuinely optional. Rust's \code{Option} makes ``absent'' a first-class, type-checked state rather than a magic empty string, and the \code{info} command reflects this with calls such as \code{pkg.description.as\_deref().unwrap\_or("None")}.
+  \item \textbf{\code{\#[serde(default)]} for forward compatibility.} Every collection field and every scalar with a sensible zero is marked \code{default}, so an older or hand-written JSON record that omits, say, \code{conflicts} or \code{install\_date} still deserialises cleanly. This is what lets the repository index be authored by hand or by tooling without listing every field.
+  \item \textbf{\code{files: Vec<String>}} is the manifest of paths the package owns. It is empty in the repository index and is \emph{populated at install time} by listing the archive's contents --- this is the record that later makes a clean \code{remove} possible.
+  \item \textbf{\code{dependencies}, \code{conflicts}, \code{provides}, \code{optional\_deps}} drive resolution. As discussed below, \code{dependencies} and \code{conflicts} are actively used by the resolver; \code{provides} and \code{optional\_deps} are stored but not yet consulted.
+\end{itemize}
+
+The version is a plain \code{String}. There is no semantic-versioning type and no comparison logic --- versions are matched and displayed verbatim, never ordered. The struct carries two small helpers used for presentation:
+
+\begin{lstlisting}[language=Rust, caption={\file{model.rs} --- presentation helpers}]
+pub fn full_name(&self) -> String {
+    format!("{}-{}", self.name, self.version)
+}
+
+pub fn formatted_size(&self) -> String {
+    if self.installed_size < 1024 {
+        format!("{} B", self.installed_size)
+    } else if self.installed_size < 1024 * 1024 {
+        format!("{:.1} KiB", self.installed_size as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", self.installed_size as f64 / (1024.0 * 1024.0))
+    }
+}
+\end{lstlisting}
+
+\code{full\_name} produces the \code{name-version} string used both in user-facing messages and to construct archive filenames; \code{formatted\_size} renders the byte count as a human-readable size for the \code{info} command.
+
+\section{The Package Database (\file{db.rs})}
+
+The database is not a SQL engine or a binary store --- it is two JSON files on disk, deserialised into two \code{HashMap}s in memory. The \code{PackageDatabase} struct holds both maps plus the active configuration:
+
+\begin{lstlisting}[language=Rust, caption={\file{db.rs} --- the in-memory database}]
+pub struct PackageDatabase {
+    pub installed_packages: HashMap<String, Package>,
+    pub available_packages: HashMap<String, Package>,
+    pub config: Config,
+}
+\end{lstlisting}
+
+The \code{config} field is declared \code{pub} so that \file{commands.rs} can read the repository list directly (for example, to synthesise a download URL from the first enabled repository). Previously this field was private (\code{\_config}); making it public is what allows the install path to be free of hardcoded URLs.
+
+The on-disk locations are fixed constants in \file{config.rs}; both database files live under \code{/var/lib/aupkg}. Table~\ref{tab:aupkg-paths} lists the full filesystem layout the tool assumes.
+
+\begin{table}[h]
+\centering
+\caption{On-disk paths used by \file{aupkg} (constants from \file{config.rs}).}
+\label{tab:aupkg-paths}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Path} & \textbf{Role} & \textbf{Format} \\
+\midrule
+\code{/etc/aulinux/aupkg/aupkg.json}   & Main configuration file        & JSON \code{Config} \\
+\code{/etc/aulinux/aupkg/mirrors.json} & Optional mirror override list  & JSON \code{Vec<RepoEntry>} \\
+\code{/var/cache/aupkg}                & Cache directory (declared)     & directory \\
+\code{/var/lib/aupkg}                  & Database directory             & directory \\
+\code{/var/lib/aupkg/repo.db}          & Available packages (the index) & JSON map name $\rightarrow$ \code{Package} \\
+\code{/var/lib/aupkg/local.db}         & Installed packages             & JSON map name $\rightarrow$ \code{Package} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Loading and the \code{installed} flag}
+
+Loading is straightforward \code{serde\_json} deserialisation guarded by an existence check, so a fresh system with no database simply starts empty. When the installed database is read back, every record's \code{installed} flag is forced \code{true}, since by definition everything in \file{local.db} is installed:
+
+\begin{lstlisting}[language=Rust, caption={\file{db.rs} --- loading the installed database}]
+pub fn load_installed(&mut self) -> std::io::Result<()> {
+    let db_path = Config::get_local_db_path();
+    if db_path.exists() {
+        let content = fs::read_to_string(db_path)?;
+        self.installed_packages = serde_json::from_str(&content)?;
+        for pkg in self.installed_packages.values_mut() {
+            pkg.installed = true;
+        }
+    }
+    Ok(())
+}
+\end{lstlisting}
+
+The available-package index (\file{repo.db}) is loaded the same way but without the flag fixup. There is also a \code{save\_available} method, marked \code{\#[allow(dead\_code)]}, used only for bootstrapping or tests --- the running tool never writes the index itself.
+
+\subsection{Atomic writes --- what is and isn't durable}
+
+The one genuinely careful piece of the database layer is \code{atomic\_write}. Rather than truncating the live database in place (where a crash would leave it half-written and unparseable), it writes to a temporary file in the same directory, \code{fsync}s that file, and then \code{rename}s it over the target. On a POSIX filesystem \code{rename} within a directory is atomic, so a reader always sees either the complete old file or the complete new one.
+
+\begin{lstlisting}[language=Rust, caption={\file{db.rs} --- atomic, fsynced replace of the database file}]
+fn atomic_write<P: AsRef<Path>>(path: P, content: &str) -> std::io::Result<()> {
+    let path = path.as_ref();
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "No parent directory found")
+    })?;
+
+    let tmp_path = dir.join(format!("{}.tmp",
+        path.file_name().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid file name")
+        })?.to_string_lossy()));
+
+    fs::write(&tmp_path, content)?;
+
+    // Explicitly sync file content to disk
+    let file = fs::File::open(&tmp_path)?;
+    file.sync_all()?;
+
+    // Atomic replace
+    fs::rename(tmp_path, path)?;
+    Ok(())
+}
+\end{lstlisting}
+
+Both \code{save\_installed} and \code{save\_available} create \code{/var/lib/aupkg} if needed, serialise their map with \code{serde\_json::to\_string\_pretty}, and route the write through \code{atomic\_write}.
+
+\begin{warnbox}[Atomicity covers the database, not the transaction]
+\code{atomic\_write} makes a \emph{single database file} update crash-safe. It does \emph{not} make an installation transactional. During \code{install}, files are extracted to the root filesystem first, and only afterward is \file{local.db} saved --- and only once, after the entire batch. If the process dies mid-batch, files from a partially installed package can already be on disk with no database record of them, and there is no rollback. ``Atomic'' here means the metadata file is never torn, not that an install can be undone.
+\end{warnbox}
+
+The remaining methods are thin accessors over the maps --- \code{is\_installed}, \code{get\_installed}, \code{get\_available}, \code{add\_installed}, \code{remove\_installed} --- plus the search routine. \code{add\_installed} is where the install timestamp is stamped, using \code{chrono} to record milliseconds since the Unix epoch:
+
+\begin{lstlisting}[language=Rust, caption={\file{db.rs} --- recording an installed package}]
+pub fn add_installed(&mut self, mut pkg: Package) {
+    pkg.installed = true;
+    pkg.install_date = chrono::Utc::now().timestamp_millis();
+    self.installed_packages.insert(pkg.name.clone(), pkg);
+}
+\end{lstlisting}
+
+\code{search} lowercases the keyword once and scans the \emph{available} map, matching against each package's name and (if present) description, cloning matches into a result vector and flagging any that are also installed.
+
+\section{Configuration (\file{config.rs})}
+
+Configuration is itself a \code{serde}-serialisable struct. A \code{Config} holds a free-form \code{settings} map and an ordered list of repositories; each \code{RepoEntry} is a name, a URL, and an \code{enabled} flag that defaults to \code{true} via a small helper so older config files without the field still parse.
+
+\begin{lstlisting}[language=Rust, caption={\file{config.rs} --- the configuration types}]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RepoEntry {
+    pub name: String,
+    pub url: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Config {
+    pub settings: HashMap<String, String>,
+    pub repositories: Vec<RepoEntry>,
+}
+\end{lstlisting}
+
+The \code{Default} implementation defines the baseline system: a \code{settings} map seeded with the host architecture (from \code{std::env::consts::ARCH}), a \code{parallel\_downloads} hint of 5, \code{check\_space} and \code{verbose} flags, and two enabled repositories, \code{core} and \code{extra}, both pointing at \code{https://repo.aulinux.org}.
+
+\subsection{Dynamic mirror loading}
+
+\code{Config::load} is layered. It first tries to read and parse \code{/etc/aulinux/aupkg/aupkg.json}; any failure to read \emph{or} parse silently falls back to \code{Config::default()} rather than erroring. It then immediately calls \code{load\_dynamic\_mirrors}, which lets the repository list be overridden at runtime without editing the main configuration file:
+
+\begin{lstlisting}[language=Rust, caption={\file{config.rs} --- runtime mirror overrides via \code{load\_dynamic\_mirrors}}]
+pub fn load_dynamic_mirrors(&mut self) {
+    // 1. Environment variable: AUPKG_MIRRORS="name=url,name2=url2"
+    if let Ok(env_mirrors) = std::env::var("AUPKG_MIRRORS") {
+        let mut env_repos = Vec::new();
+        for part in env_mirrors.split(',') {
+            let kv: Vec<&str> = part.split('=').collect();
+            if kv.len() == 2 {
+                env_repos.push(RepoEntry {
+                    name: kv[0].trim().to_string(),
+                    url: kv[1].trim().to_string(),
+                    enabled: true,
+                });
+            }
+        }
+        if !env_repos.is_empty() { self.repositories = env_repos; return; }
+    }
+
+    // 2. Otherwise, /etc/aulinux/aupkg/mirrors.json (a Vec<RepoEntry>)
+    let mirrors_path = Path::new(Self::CONFIG_DIR).join("mirrors.json");
+    if mirrors_path.exists() {
+        if let Ok(content) = fs::read_to_string(mirrors_path) {
+            if let Ok(custom_repos) = serde_json::from_str::<Vec<RepoEntry>>(&content) {
+                if !custom_repos.is_empty() { self.repositories = custom_repos; }
+            }
+        }
+    }
+}
+\end{lstlisting}
+
+The precedence is strict and easy to reason about:
+
+\begin{enumerate}
+  \item \textbf{\code{AUPKG\_MIRRORS} environment variable.} If set and non-empty, its entries \emph{replace} the repository list entirely and the function returns immediately. The format is a comma-separated list of \code{name=url} pairs (e.g.\ \code{AUPKG\_MIRRORS="local=file:///repo/core,extra=file:///repo/extra"}).
+  \item \textbf{\file{/etc/aulinux/aupkg/mirrors.json}.} If the env var is absent or produced no entries, and this file exists and contains a non-empty \code{Vec<RepoEntry>}, its contents replace the repository list.
+  \item \textbf{Base config / defaults.} If neither override applies, the repositories from \file{aupkg.json} (or the hardcoded defaults) stand unchanged.
+\end{enumerate}
+
+This makes it straightforward to redirect \file{aupkg} at a local mirror in a build or test environment --- set the environment variable, run the tool, unset it --- without touching any persistent file.
+
+The struct also offers typed accessors over the \code{settings} map --- \code{get}, \code{get\_or}, and \code{get\_bool} --- and the path constants that the database layer depends on (\code{get\_db\_dir}, \code{get\_repo\_db\_path}, \code{get\_local\_db\_path}, \code{get\_cache\_dir}).
+
+\begin{notebox}[\code{settings} is mostly aspirational]
+The \code{settings} map carries keys like \code{parallel\_downloads}, \code{check\_space}, and \code{verbose}, and the typed accessors to read them exist --- but the command implementations never consult them. There is no parallel downloading, no free-space check, and no settings-driven verbosity in the current code. They are reserved keys, not active behaviour.
+\end{notebox}
+
+\section{Command Implementations (\file{commands.rs})}
+
+\subsection{Dependency resolution}
+
+Before installing anything, \code{execute} runs \code{resolve\_dependencies}, a fully implemented recursive resolver with cycle detection. It performs a depth-first traversal, building an install order in which dependencies precede dependants, and tracks an ``in-progress'' set (\code{unresolved: HashSet<String>}) to catch circular dependencies.
+
+\begin{lstlisting}[language=Rust, caption={\file{commands.rs} --- the recursive resolver core}]
+fn resolve(pkg_name: &str, db: &PackageDatabase,
+           resolved: &mut Vec<String>,
+           unresolved: &mut HashSet<String>) -> Result<(), String> {
+    if db.is_installed(pkg_name) { return Ok(()); }
+    if resolved.contains(&pkg_name.to_string()) { return Ok(()); }
+    if unresolved.contains(pkg_name) {
+        return Err(format!("Circular dependency detected: {}", pkg_name));
+    }
+    unresolved.insert(pkg_name.to_string());
+    if let Some(pkg) = db.get_available(pkg_name) {
+        for dep in &pkg.dependencies { resolve(dep, db, resolved, unresolved)?; }
+    } else {
+        return Err(format!("Package '{}' not found in available repositories", pkg_name));
+    }
+    unresolved.remove(pkg_name);
+    resolved.push(pkg_name.to_string());
+    Ok(())
+}
+\end{lstlisting}
+
+The algorithm has four early-exit cases before recursing:
+
+\begin{itemize}
+  \item \textbf{Already installed.} \code{db.is\_installed(pkg\_name)} returns immediately --- no work to do.
+  \item \textbf{Already resolved.} Prevents re-adding a package that was pulled in as a transitive dependency of an earlier request.
+  \item \textbf{Circular dependency.} If the name is already in \code{unresolved} (the current DFS call stack), a cycle exists and an error is returned immediately.
+  \item \textbf{Not found.} If the name is absent from the available index, resolution fails with a clear error --- \file{aupkg} will not install a package whose dependencies cannot be satisfied.
+\end{itemize}
+
+After the traversal, a second pass validates conflicts: for every package in the resolved set, if any of its \code{conflicts} entries is already installed or is also in the resolved set, the whole operation is rejected before a single file is touched. Because \code{resolve\_dependencies} returns \code{Result<Vec<String>, String>}, the \code{?} operator in the caller propagates failure instantly.
+
+\begin{notebox}[What the resolver does and does not do]
+The resolver handles ordering, deduplication, missing-package detection, cycle detection, and hard conflicts. It does \emph{not} consider \code{optional\_deps} or \code{provides}, performs no version constraint solving (versions are ignored entirely during resolution), and treats every dependency name as an exact key into the available map.
+\end{notebox}
+
+\subsection{Install}
+
+The install flow is:
+\begin{enumerate}
+  \item Call \code{resolve\_dependencies} --- fail hard with \code{return Err(...)} on any error.
+  \item If the resolved list is empty, all packages are already installed; print a message and return.
+  \item For each name in resolved order (dependencies first):
+    \begin{enumerate}
+      \item Skip if already installed (a dependency may have been satisfied by a prior iteration).
+      \item Clone the available record out of \code{db} (satisfying the borrow checker).
+      \item Determine the download URL.
+      \item Download the archive.
+      \item Validate archive paths.
+      \item Extract.
+      \item Record in the database.
+    \end{enumerate}
+  \item Persist \file{local.db} once, after the full batch.
+\end{enumerate}
+
+\textbf{URL construction.} The URL is taken from the package's own \code{url} field if present; otherwise it is synthesised from the first enabled repository entry in \code{db.config.repositories} as \code{\{repo\_url\}/\{name\}-\{version\}.tar.gz}. If no repository is enabled at all, the fallback is the hardcoded string \code{https://repo.aulinux.org/core}. Because \code{db.config} is now \code{pub}, the install path can read the live repository list directly rather than duplicating it.
+
+\textbf{Download.} A \code{file://} URL is handled specially: the path after the scheme prefix is copied locally using \code{std::fs::copy}, bypassing the network entirely. All other URLs are fetched by shelling out to \code{curl -L -o}. If the download fails and no local fallback exists, an \code{Err} is returned immediately --- the loop does not silently continue.
+
+\begin{lstlisting}[language=Rust, caption={\file{commands.rs} --- \code{file://} fast-path and \code{curl} fallback}]
+let mut downloaded = false;
+if url.starts_with("file://") {
+    let local_path = url.trim_start_matches("file://");
+    if std::path::Path::new(local_path).exists() {
+        if let Err(e) = std::fs::copy(local_path, &archive_path) {
+            eprintln!("Failed to copy local package: {}", e);
+        } else {
+            downloaded = true;
+        }
+    }
+}
+if !downloaded {
+    let status = Command::new("curl")
+        .arg("-L").arg("-o").arg(&archive_path).arg(&url)
+        .status();
+    if status.is_err() || !status.unwrap().success() {
+        return Err(format!("Could not fetch package archive: {}", url).into());
+    }
+}
+\end{lstlisting}
+
+\textbf{Archive validation and extraction.} Before extraction, \file{aupkg} lists the archive (\code{tar -tf}) and runs every entry through \code{validate\_archive\_files} (described in the next subsection). Only if validation passes is the file set stored into \code{pkg.files} and the archive extracted with \code{tar -xf -C /}. The temporary archive is removed whether extraction succeeds or fails; any failure returns an \code{Err} and aborts.
+
+\begin{warnbox}[Extraction trusts \code{tar}, and runs as whoever invokes it]
+Validation is performed against the \emph{listing} produced by \code{tar -tf}, and extraction is a separate \code{tar -xf} invocation. The check meaningfully blocks the classic \code{../../etc/shadow} traversal, but it does not verify symlink targets inside the archive, and there is no checksum or signature verification of the downloaded bytes. Extraction writes directly into \code{/}, so \file{aupkg} must be run with sufficient privilege and inherently trusts the integrity of its mirrors.
+\end{warnbox}
+
+\subsection{Archive path validation}
+
+\code{validate\_archive\_files} is the security heart of the installer. It is called before any bytes are written to the root filesystem. The function iterates every path string emitted by \code{tar -tf} and applies three independent checks:
+
+\begin{lstlisting}[language=Rust, caption={\file{commands.rs} --- archive path validation (anti directory-traversal)}]
+fn validate_archive_files(files: &[String]) -> Result<(), String> {
+    for file in files {
+        let path = std::path::Path::new(file);
+        for component in path.components() {
+            if component == std::path::Component::ParentDir {
+                return Err(format!(
+                    "Directory traversal ('..') detected in archive path: {}", file));
+            }
+            if component == std::path::Component::RootDir {
+                return Err(format!(
+                    "Absolute path ('/') detected in archive path: {}", file));
+            }
+        }
+        if file.contains("..") {
+            return Err(format!(
+                "Directory traversal pattern detected in archive path: {}", file));
+        }
+    }
+    Ok(())
+}
+\end{lstlisting}
+
+\begin{itemize}
+  \item \textbf{Component-level \code{ParentDir} check.} \code{std::path::Path::components()} parses the path into typed segments. If any segment is \code{Component::ParentDir} (the \code{..} token), the path is rejected. This catches \code{usr/bin/../../etc/shadow} regardless of how the separators are encoded.
+  \item \textbf{Component-level \code{RootDir} check.} If any segment is \code{Component::RootDir} (a leading \code{/}), the path is an absolute path and is rejected. This prevents an archive from writing directly to \code{/etc/shadow}.
+  \item \textbf{String-level \code{".."} check.} A defensive belt-and-suspenders check: if the raw path string contains the two-character sequence \code{..} anywhere (after the component checks have already passed), it is also rejected. This guards against any edge-case in the component parser.
+\end{itemize}
+
+\subsection{Remove}
+
+Removal is the install path run backwards, file by file. For each requested package the installed record is cloned out of the database, and its \code{files} manifest is walked \emph{in reverse} so that directory contents are deleted before the directories that contain them. Regular files are unlinked; directories are removed only if empty (\code{fs::remove\_dir} fails on non-empty directories, and the error is deliberately ignored):
+
+\begin{lstlisting}[language=Rust, caption={\file{commands.rs} --- removing a package's files}]
+for file in pkg.files.iter().rev() {
+    let path = std::path::Path::new("/").join(file);
+    if path == std::path::Path::new("/") { continue; } // never touch root
+    if path.is_dir() {
+        let _ = fs::remove_dir(&path);   // only succeeds if empty
+    } else {
+        let _ = fs::remove_file(&path);  // ignore errors
+    }
+}
+db.remove_installed(&pkg_name);
+\end{lstlisting}
+
+After the loop the record is dropped from the in-memory map and \code{save\_installed()} rewrites \file{local.db}. Filesystem errors during removal are swallowed (\code{let \_ = ...}), so a remove ``succeeds'' from the database's point of view even if some files were already gone --- which is forgiving, but means a half-removed package leaves no warning.
+
+\subsection{Search, info, and list}
+
+These three read-only commands are direct uses of the database. \code{search} prints each matching available package with an \code{[installed]} tag and indented description. \code{info} looks the name up in the installed map first, then the available map, and prints a labelled block of fields --- name, version, description, architecture, URL, licenses, formatted installed size, and installed state --- using the \code{Option} accessors to substitute \code{"None"} or \code{"any"} where metadata is absent. \code{list} simply iterates \code{db.installed\_packages.values()} and prints \code{name version} for each.
+
+\subsection{Update and upgrade}
+
+These two subcommands exist in the interface but are not yet implemented:
+
+\begin{lstlisting}[language=Rust, caption={\file{commands.rs} --- \code{update} and \code{upgrade} are placeholders}]
+Commands::Update => {
+    println!("Updating package database...");
+    // In a real implementation, this would download repo.db from mirrors
+    println!("Package database updated.");
+}
+Commands::Upgrade => {
+    println!("Upgrading installed packages...");
+    // Logic to check versions and upgrade
+    println!("System is up to date.");
+}
+\end{lstlisting}
+
+\code{update} prints success without fetching anything, and \code{upgrade} unconditionally declares the system up to date. The available index in \file{repo.db} must therefore be supplied out of band --- for example by the build tooling described below --- rather than synced by \code{update}.
+
+\section{Unit Tests}
+
+\file{commands.rs} ships a \code{\#[cfg(test)] mod tests} block that exercises the two most security- and correctness-critical functions: the archive validator and the dependency resolver. All five tests are self-contained --- they construct their own in-memory \code{PackageDatabase} instances, bypassing the filesystem entirely.
+
+\begin{table}[h]
+\centering
+\caption{Unit tests in \file{commands.rs}.}
+\label{tab:aupkg-tests}
+\begin{tabular}{@{}lp{8.5cm}@{}}
+\toprule
+\textbf{Test name} & \textbf{What it verifies} \\
+\midrule
+\code{test\_validate\_archive\_files\_safe}       & Three benign relative paths (\code{usr/bin/foo}, \code{etc/bar.conf}, \code{var/log/baz.log}) all pass validation without error. \\
+\code{test\_validate\_archive\_files\_traversal}  & A path containing \code{..} components (\code{usr/bin/../../etc/shadow}) is rejected with an \code{Err}. \\
+\code{test\_validate\_archive\_files\_absolute}   & An absolute path (\code{/etc/shadow}) is rejected with an \code{Err}. \\
+\code{test\_resolve\_dependencies}               & A linear chain A $\to$ B $\to$ C resolves to the correct install order \code{[C, B, A]} (dependencies precede dependants). \\
+\code{test\_resolve\_dependencies\_circular}     & A cycle A $\to$ B $\to$ A is detected and returns \code{Err}, never producing a result vector. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The circular-dependency test is a concise demonstration of the resolver's safety guarantee:
+
+\begin{lstlisting}[language=Rust, caption={\file{commands.rs} --- \code{test\_resolve\_dependencies\_circular}: cycle detection test}]
+#[test]
+fn test_resolve_dependencies_circular() {
+    let config = Config::default();
+    let mut db = PackageDatabase::new(config);
+
+    let mut pkg_a = Package::new("A".to_string(), "1.0.0".to_string());
+    pkg_a.dependencies = vec!["B".to_string()];
+
+    let mut pkg_b = Package::new("B".to_string(), "1.0.0".to_string());
+    pkg_b.dependencies = vec!["A".to_string()];
+
+    db.available_packages.insert("A".to_string(), pkg_a);
+    db.available_packages.insert("B".to_string(), pkg_b);
+
+    assert!(resolve_dependencies(&["A".to_string()], &db).is_err());
+}
+\end{lstlisting}
+
+When the resolver visits \texttt{A} it marks it in \code{unresolved}, then recurses into \texttt{B}, which in turn tries to recurse back into \texttt{A}. On that second visit \texttt{A} is still in \code{unresolved}, so the \code{if unresolved.contains(pkg\_name)} guard fires and returns \code{Err("Circular dependency detected: A")} --- which propagates via \code{?} all the way out to \code{resolve\_dependencies}.
+
+The linear-chain test (\code{test\_resolve\_dependencies}) mirrors the production case: package \texttt{A} depends on \texttt{B}, which depends on \texttt{C}. The resolved order is \code{[C, B, A]}, asserting that leaf dependencies are installed first.
+
+\section{Where the Repository Comes From}
+
+Because \code{update} does not yet populate \file{repo.db}, the available-package index is produced by the build system. The repository-population script (\file{scripts/populate\_repo.sh}) drives a separate \code{aubuild} tool to package the system's own components --- the init/shell ``base-system'', the Go \code{coreutils} multicall binary, and \file{aupkg} itself --- into \code{name-version} archives under a \code{repo/core} directory, mirroring exactly the \code{\{name\}-\{version\}.tar.gz} layout the installer expects. In other words, the same naming convention the install path synthesises for downloads is the convention the build side emits, so a locally built repository can be consumed directly by pointing a \code{file://} URL or a mirror override at it.
+
+\section{Design Rationale and Limitations}
+
+\file{aupkg} is best understood as a correct, honest skeleton of a package manager: the parts that are implemented are implemented carefully, and the parts that are not are clearly marked rather than faked. Table~\ref{tab:aupkg-status} gives the candid status of the features one expects from a package manager.
+
+\begin{table}[h]
+\centering
+\caption{Honest feature status of \file{aupkg} as implemented.}
+\label{tab:aupkg-status}
+\begin{tabular}{@{}lp{8.6cm}@{}}
+\toprule
+\textbf{Feature} & \textbf{Status} \\
+\midrule
+Dependency resolution & \textbf{Implemented.} Recursive DFS with ordering, dedup, missing-package and cycle detection; plus a hard-conflict check. Ignores versions, \code{provides}, and \code{optional\_deps}. \\
+Directory-traversal defence & \textbf{Implemented.} Archive listing is validated against \code{ParentDir} components, \code{RootDir} components, and \code{".."} substrings before extraction. \\
+Atomic database writes & \textbf{Implemented for the metadata file.} Temp-file + \code{fsync} + \code{rename}. Does not make an install transactional. \\
+\code{file://} URL support & \textbf{Implemented.} Local archives are copied with \code{std::fs::copy}; no network required. \\
+Dynamic mirror overrides & \textbf{Implemented.} \code{AUPKG\_MIRRORS} env var overrides the repo list; \file{mirrors.json} is the secondary fallback. \\
+Unit tests & \textbf{Implemented.} Five tests covering archive validation (safe, traversal, absolute) and dependency resolution (linear chain, cycle). \\
+Transactional install / rollback & \textbf{Not implemented.} Files are extracted before the DB is saved once per batch; a crash can orphan files with no rollback. \\
+Integrity / checksums / signatures & \textbf{Not implemented.} Downloaded bytes are trusted; no hash or signature is checked. \\
+Networking & \textbf{Shells out to \code{curl}.} No native HTTP client; offline \code{file://} packages are supported directly. \\
+\code{update} (repo sync) & \textbf{Stub.} Prints success; the index is supplied by build tooling. \\
+\code{upgrade} & \textbf{Stub.} Always reports the system up to date; no version comparison exists. \\
+Global flags (\code{--yes}/\code{--quiet}/\code{--verbose}) & \textbf{Parsed but unused.} No effect on behaviour. \\
+\code{settings} (parallel/space/verbose) & \textbf{Reserved keys.} Stored and readable, never acted upon. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The dependency on only four crates --- \code{clap} for the CLI, \code{serde} and \code{serde\_json} for the data model and on-disk format, and \code{chrono} for timestamps (declared in \file{Cargo.toml}) --- keeps the tool lean and auditable. There is no async runtime, no HTTP stack, and no embedded database; networking is delegated to \code{curl} and archive handling to \code{tar}, which trades a smaller binary and dependency surface for a reliance on those external programs being present.
+
+\begin{infobox}[The takeaway]
+\file{aupkg} demonstrates the Rust value proposition for systems tooling in miniature: a typed, \code{serde}-backed data model; a \code{clap}-driven CLI; \code{Result}-everywhere error handling that aborts cleanly on the first failure; a borrow-checker-guided install loop; a real (if version-blind) recursive dependency resolver with cycle detection; a security-hardened extraction path with component-level path validation; dynamic mirror configuration via environment variable or file; and a unit-test suite covering the sharpest corners --- all in a few hundred lines. Its limitations are real, but they are visible in the code and named here, which is exactly the posture a system component should take.
+\end{infobox}

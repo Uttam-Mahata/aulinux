@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::fs;
+use std::path::Path;
 use crate::model::Package;
 use crate::config::Config;
 
 pub struct PackageDatabase {
     pub installed_packages: HashMap<String, Package>,
     pub available_packages: HashMap<String, Package>,
-    _config: Config,
+    pub config: Config,
 }
 
 impl PackageDatabase {
@@ -14,8 +15,32 @@ impl PackageDatabase {
         Self {
             installed_packages: HashMap::new(),
             available_packages: HashMap::new(),
-            _config: config,
+            config,
         }
+    }
+
+    fn atomic_write<P: AsRef<Path>>(path: P, content: &str) -> std::io::Result<()> {
+        let path = path.as_ref();
+        let dir = path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "No parent directory found")
+        })?;
+        
+        let tmp_path = dir.join(format!(
+            "{}.tmp",
+            path.file_name().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid file name")
+            })?.to_string_lossy()
+        ));
+        
+        fs::write(&tmp_path, content)?;
+        
+        // Explicitly sync file content to disk
+        let file = fs::File::open(&tmp_path)?;
+        file.sync_all()?;
+        
+        // Atomic replace
+        fs::rename(tmp_path, path)?;
+        Ok(())
     }
 
     pub fn load_installed(&mut self) -> std::io::Result<()> {
@@ -35,7 +60,7 @@ impl PackageDatabase {
         fs::create_dir_all(db_dir)?;
         let db_path = Config::get_local_db_path();
         let content = serde_json::to_string_pretty(&self.installed_packages)?;
-        fs::write(db_path, content)?;
+        Self::atomic_write(db_path, &content)?;
         Ok(())
     }
 
@@ -55,7 +80,7 @@ impl PackageDatabase {
         fs::create_dir_all(db_dir)?;
         let db_path = Config::get_repo_db_path();
         let content = serde_json::to_string_pretty(&self.available_packages)?;
-        fs::write(db_path, content)?;
+        Self::atomic_write(db_path, &content)?;
         Ok(())
     }
 

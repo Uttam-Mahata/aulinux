@@ -7,6 +7,7 @@ import (
 
 	"aulinux/shell"
 	"aulinux/utils/cmd/aubuild"
+	"aulinux/utils/cmd/auctl"
 	"aulinux/utils/cmd/cat"
 	"aulinux/utils/cmd/chmod"
 	"aulinux/utils/cmd/cp"
@@ -68,6 +69,8 @@ func main() {
 		groupadd.Run(args)
 	case "aubuild":
 		aubuild.Run(args)
+	case "auctl":
+		auctl.Run(args)
 	case "aush", "sh": // "sh" is often a symlink to the shell
 		shell.Run(args)
 	default:

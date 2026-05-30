@@ -271,7 +271,7 @@ def build_package(pkg_info):
         "version": version,
         "description": pkg_info["description"],
         "maintainer": pkg_info["maintainer"],
-        "architecture": "x86_64",
+        "architecture": _platform.machine(),
         "installed_size": total_size,
         "dependencies": pkg_info["dependencies"],
         "optional_deps": [],

@@ -75,7 +75,7 @@ create_graphics_package() {
   "version": "$version",
   "description": "$desc",
   "maintainer": "AuLinux Graphics Team",
-  "architecture": "x86_64",
+  "architecture": "$(uname -m)",
   "installed_size": $size,
   "dependencies": [$(echo "$deps" | sed 's/,/", "/g' | sed 's/^/&"/;s/$/&"/' | sed 's/""//g')],
   "optional_deps": [],

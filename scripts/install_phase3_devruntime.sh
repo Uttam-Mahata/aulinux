@@ -91,9 +91,13 @@ if [ -n "$NODE_PATH_HOST" ] && [ -d "$NODE_PATH_HOST" ]; then
     cp -L "$NODE_PATH_HOST/bin/node" "$ROOTFS_DIR/usr/bin/"
     resolve_deps "$NODE_PATH_HOST/bin/node" "$ROOTFS_DIR"
     
-    # Copy npm and npx and their libraries
-    mkdir -p "$ROOTFS_DIR/usr/lib"
-    cp -r "$NODE_PATH_HOST/lib/node_modules" "$ROOTFS_DIR/usr/lib/"
+    # Copy npm and npx and their libraries (selective copy to prevent initramfs size bloat)
+    mkdir -p "$ROOTFS_DIR/usr/lib/node_modules"
+    for mod in npm corepack wrangler; do
+        if [ -d "$NODE_PATH_HOST/lib/node_modules/$mod" ]; then
+            cp -r "$NODE_PATH_HOST/lib/node_modules/$mod" "$ROOTFS_DIR/usr/lib/node_modules/"
+        fi
+    done
     
     # Re-create npm and npx symlinks
     ln -sf ../lib/node_modules/npm/bin/npm-cli.js "$ROOTFS_DIR/usr/bin/npm"

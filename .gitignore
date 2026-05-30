@@ -58,6 +58,9 @@ temp/
 # Generated root filesystem (large binary)
 rootfs/
 
+# Temporary package staging directories
+pkg_tmp*/
+
 # Debian/RPM packages
 *.deb
 *.rpm

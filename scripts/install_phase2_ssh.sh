@@ -161,6 +161,7 @@ if [ -f "$REPO_DB" ]; then
     echo "  + Updating package registry repo.db..."
     python3 - <<EOF
 import json
+import platform
 repo_path = "$REPO_DB"
 try:
     with open(repo_path, 'r') as f:
@@ -173,7 +174,7 @@ db["openssh"] = {
     "version": "9.6p1",
     "description": "Real OpenSSH client and daemon server",
     "maintainer": "AULinux Core Team",
-    "architecture": "x86_64",
+    "architecture": platform.machine(),
     "installed_size": 4096000,
     "dependencies": [],
     "optional_deps": [],

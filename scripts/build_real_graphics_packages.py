@@ -331,7 +331,7 @@ def build_package(pkg):
         "version":        version,
         "description":    pkg["description"],
         "maintainer":     "AULinux Graphics Team",
-        "architecture":   "x86_64",
+        "architecture":   _platform.machine(),
         "installed_size": total,
         "dependencies":   pkg["dependencies"],
         "optional_deps":  [],

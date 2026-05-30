@@ -1,0 +1,824 @@
+\chapter{Assembly and the Build Pipeline}
+\label{chap:build}
+
+A finished operating system is not a single program. It is a carefully arranged
+constellation of artifacts --- a static C \code{init} that the kernel hands
+control to as PID~1, a Go multicall binary that pretends to be a dozen
+familiar coreutils, a Rust package manager, a sprinkling of kernel modules,
+configuration files in their canonical FHS locations, a compressed root
+filesystem image, and a bootloader that knows how to find all of it. The
+interesting engineering question is not how to compile any one of these
+pieces, but how to make a single command turn a polyglot source tree into a
+bootable image, reproducibly and in the right order.
+
+This chapter walks the \emph{actual} AULinux build pipeline as it exists in
+the \file{scripts/} directory. Every command, flag, and path quoted below is
+taken verbatim from the scripts; where a script is partial, assumes host
+prerequisites, or relies on mock content, that is called out honestly rather
+than papered over.
+
+\section{The Challenge of a Polyglot Build}
+
+AULinux is written in four languages, each with its own toolchain and its own
+opinion about output layout:
+
+\begin{itemize}
+  \item The \textbf{init system} is C, compiled with \code{gcc} through a
+        hand-written \file{Makefile}.
+  \item The \textbf{userland} (shell plus coreutils) is Go, compiled into a
+        single \emph{multicall} binary with \code{go build}.
+  \item The \textbf{package manager} is Rust, compiled with
+        \code{cargo build --release}.
+  \item The \textbf{kernel modules} are C, compiled out-of-tree against the
+        host's kbuild infrastructure.
+\end{itemize}
+
+No single language's build tool can orchestrate the others. Cargo does not
+know how to invoke \code{go build}; \code{make} does not understand Cargo
+target triples; none of them know how to lay out an FHS tree or pack a cpio
+archive. The pragmatic glue layer is therefore a set of POSIX shell scripts.
+Shell is the lowest common denominator that can call every toolchain, copy
+files, create symlinks, and shell out to \code{cpio}, \code{tar}, and
+\code{qemu} --- exactly the heterogeneous, side-effect-heavy work that
+operating-system assembly consists of.
+
+\begin{infobox}[The orchestration model]
+The pipeline is staged on purpose. \file{build.sh} \emph{compiles} each
+subsystem into \file{build/}, knowing nothing about filesystems or boot.
+\file{make\_rootfs.sh} then \emph{assembles} those artifacts into an FHS tree,
+and \file{run\_qemu.sh} \emph{packs and boots} it. Compilation, assembly, and
+boot are cleanly separated, so any stage can be re-run independently.
+\end{infobox}
+
+\begin{table}[h]
+\centering
+\caption{Each subsystem, its toolchain, build command, and output artifact.}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Subsystem} & \textbf{Language} & \textbf{Build command} & \textbf{Artifact} \\
+\midrule
+Init       & C    & \code{make} (gcc \code{-static -O2})                        & \file{build/init/au-init} \\
+Utils + Shell & Go & \code{go build} (\code{CGO\_ENABLED=0}, \code{-s -w -extldflags '-static'}) & \file{build/utils/auutils} (+ symlinks) \\
+Package mgr & Rust & \code{cargo build --release} (\code{crt-static}, x86\_64 target) & \file{build/pkg-manager/aupkg} \\
+Kernel mods & C   & \code{make -C \$KDIR M=src modules}                         & \file{build/kernel/*.ko} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{\file{build.sh}: The Orchestrator}
+
+\file{build.sh} is the entry point. It begins defensively --- \code{set -e} on
+line~7 makes any non-zero exit abort the whole build --- and resolves the
+project root from its own location, so it works regardless of the caller's
+working directory:
+
+\begin{lstlisting}[language=bash, caption={build.sh --- safe root resolution and fail-fast mode}]
+set -e
+# Project root
+PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_DIR="$PROJECT_ROOT/build"
+\end{lstlisting}
+
+The \code{all} target (the default, dispatched by the \code{case} at the
+bottom of the file) calls the per-subsystem builders in a deliberate order:
+
+\begin{lstlisting}[language=bash, caption={build.sh --- the build\_all driver and its phase order}]
+build_all() {
+    print_banner
+    mkdir -p "$BUILD_DIR"
+
+    build_init
+    # build_shell is covered by build_utils now
+    build_utils
+    build_pkgmanager
+    build_kernel
+    ...
+}
+\end{lstlisting}
+
+The real order is therefore: \textbf{init $\rightarrow$ utils (which is also
+the shell) $\rightarrow$ package manager $\rightarrow$ kernel modules}. Note
+that the shell is no longer built separately; \code{build\_shell} simply
+delegates to \code{build\_utils}, because the shell \code{aush} is now one of
+the applets inside the Go multicall binary.
+
+\subsection{Phase 1 --- Init (C, statically linked)}
+
+\code{build\_init} is the simplest phase: it changes into \file{init/} and runs
+\code{make}. The \file{init/Makefile} compiles \file{src/init.c} with
+\code{gcc} and the flags \code{-Wall -Wextra -O2 -static}, emitting
+\file{build/init/au-init}.
+
+\begin{infobox}[Why \code{-static} for init]
+PID~1 is the very first userspace program the kernel executes from the
+initramfs. At that instant no dynamic loader has been configured and no shared
+libraries are guaranteed to be present. A statically linked \code{au-init}
+carries its entire libc inside the executable, so it is fully relocatable and
+cannot fail with a ``library not found'' error during early boot. This is the
+single most important linking decision in the whole image.
+\end{infobox}
+
+\subsection{Phase 2 --- Utilities and shell (Go multicall binary)}
+
+This is the most carefully optimized phase. A multicall binary is a single
+executable that inspects \code{argv[0]} (the name it was invoked as) and
+dispatches to the matching applet --- the same trick BusyBox uses. One binary
+provides \code{ls}, \code{cat}, \code{cp}, the \code{aush} shell, the
+\code{aubuild} package builder, and more, with the per-applet cost being a
+single symlink rather than a whole executable.
+
+\begin{lstlisting}[language=bash, caption={build.sh --- compiling and shrinking the auutils multicall binary}]
+# Build from root to pick up go.mod
+cd "$PROJECT_ROOT"
+
+info "Compiling auutils..."
+CGO_ENABLED=0 go build -ldflags="-s -w -buildid= -extldflags '-static'" \
+    -trimpath -o "$BUILD_DIR/utils/auutils" utils/main.go
+
+# Compression (Optional)
+if command -v upx >/dev/null; then
+    info "Compressing binary with UPX..."
+    upx --best --lzma "$BUILD_DIR/utils/auutils"
+else
+    warn "UPX not found, skipping compression."
+fi
+\end{lstlisting}
+
+Every flag here is earning its place:
+
+\begin{itemize}
+  \item \code{CGO\_ENABLED=0} disables cgo entirely, so the Go toolchain never
+        calls out to the host C compiler and produces a pure-Go object graph with
+        no implicit dependency on the host's \code{libc.so}.
+  \item \code{-ldflags="-s -w"} strips the symbol table (\code{-s}) and DWARF
+        debug information (\code{-w}), shaving megabytes off the binary.
+  \item \code{-buildid=} blanks the build ID, reducing build-to-build variance.
+  \item \code{-extldflags '-static'} passes \code{-static} to the external
+        linker, forcing fully static linking at the linker level. Combined with
+        \code{CGO\_ENABLED=0}, this guarantees the resulting binary has zero
+        shared-library dependencies --- it will run on any \code{x86\_64} Linux
+        system without a dynamic loader or libc present.
+  \item \code{-trimpath} removes absolute filesystem paths from the binary,
+        which both reduces size and improves reproducibility.
+  \item \code{upx --best --lzma} (when present) further compresses the
+        executable, decompressing transparently at launch.
+\end{itemize}
+
+After compilation, the script builds a \emph{link farm} --- one relative
+symlink per applet, all pointing at \code{auutils}:
+
+\begin{lstlisting}[language=bash, caption={build.sh --- creating the applet symlink farm}]
+local UTILS=("ls" "cat" "cp" "mv" "mkdir" "rm" "chmod" "echo" "pwd" "ps" \
+             "ip" "useradd" "groupadd" "aubuild" "aush" "sh")
+info "Creating symlinks..."
+for tool in "${UTILS[@]}"; do
+    ln -sf auutils "$BUILD_DIR/utils/$tool"
+done
+\end{lstlisting}
+
+When the rootfs later invokes \file{/bin/ls}, the kernel follows the symlink to
+\code{auutils}, which reads \code{argv[0]}, sees \code{ls}, and runs the
+listing applet. Note that \code{sh} is symlinked here too, so the system shell
+is the same binary.
+
+\subsection{Phase 3 --- Package manager (Rust, fully static)}
+
+The Rust phase builds an optimized, statically-linked \code{aupkg} for an
+explicit target triple and then copies it out of Cargo's deep target tree into
+the flat \file{build/} layout the rest of the pipeline expects:
+
+\begin{lstlisting}[language=bash, caption={build.sh --- static release build of the aupkg package manager}]
+build_pkgmanager() {
+    info "Building package manager (aupkg)..."
+    cd "$PROJECT_ROOT/pkg-manager"
+    RUSTFLAGS="-C target-feature=+crt-static" \
+        cargo build --release --target x86_64-unknown-linux-gnu
+    mkdir -p "$BUILD_DIR/pkg-manager"
+    cp target/x86_64-unknown-linux-gnu/release/aupkg "$BUILD_DIR/pkg-manager/"
+    success "Package manager built"
+}
+\end{lstlisting}
+
+Two additions beyond a plain \code{cargo build --release} make the binary
+fully self-contained:
+
+\begin{itemize}
+  \item \code{RUSTFLAGS="-C target-feature=+crt-static"} instructs the Rust
+        compiler to link the C runtime (\code{crt}) statically rather than
+        depending on a dynamic \code{libc.so} at runtime. The result is a binary
+        that carries its own C runtime, with no dependency on the host's glibc
+        version.
+  \item \code{--target x86\_64-unknown-linux-gnu} pins the Cargo target triple
+        explicitly. This means Cargo places the artifact in
+        \file{target/x86\_64-unknown-linux-gnu/release/aupkg} rather than the
+        default \file{target/release/aupkg}, and the copy command reflects that
+        deeper path. An explicit triple also ensures the build is reproducible
+        regardless of the host machine's default Rust target.
+\end{itemize}
+
+Together these choices give \code{aupkg} the same ``runs anywhere on
+\code{x86\_64}'' property as \code{au-init} and \code{auutils}.
+
+\subsection{Phase 4 --- Kernel modules (out-of-tree C)}
+
+\code{build\_kernel} is the only phase allowed to fail without aborting the
+build. The \file{kernel/Makefile} uses kbuild to compile three modules ---
+\code{aulinux\_core}, \code{aulinux\_sysctl}, and \code{aulinux\_procmon} ---
+against \code{KDIR} (default \code{/lib/modules/\$(uname -r)/build}). Because
+that requires the host's kernel headers, the orchestrator wraps it
+defensively:
+
+\begin{lstlisting}[language=bash, caption={build.sh --- tolerant kernel-module phase}]
+build_kernel() {
+    info "Building kernel modules..."
+    cd "$PROJECT_ROOT/kernel"
+    if make; then
+        success "Kernel modules built"
+    else
+        warn "Kernel modules build failed (may require kernel headers)"
+    fi
+}
+\end{lstlisting}
+
+\begin{notebox}[Kernel headers are a host prerequisite]
+The module build only succeeds on a host that has matching kernel headers
+installed at \code{/lib/modules/\$(uname -r)/build}. On a headers-less machine
+the phase emits a warning and the build continues --- the resulting image
+simply ships without the \code{.ko} files. The modules are \emph{not} required
+to boot the QEMU image, which uses a separately obtained kernel (see below).
+\end{notebox}
+
+\section{Constructing the Root Filesystem (\file{make\_rootfs.sh})}
+
+With \file{build/} populated, \file{make\_rootfs.sh} assembles a Filesystem
+Hierarchy Standard (FHS) tree under \file{rootfs/}. It too runs under
+\code{set -e}.
+
+\subsection{The FHS skeleton}
+
+It first creates the conventional top-level directories --- now including
+\file{lib} and \file{lib64} which are needed by the dynamic loader and shared
+library machinery --- and tightens permissions on \file{/tmp} (the sticky bit,
+\code{1777}):
+
+\begin{lstlisting}[language=bash, caption={make\_rootfs.sh --- the FHS directory skeleton}]
+mkdir -p "$ROOTFS_DIR"/{bin,sbin,etc,usr,var,proc,sys,dev,tmp,run,boot,home,root,lib,lib64}
+mkdir -p "$ROOTFS_DIR"/etc/aulinux
+mkdir -p "$ROOTFS_DIR"/usr/{bin,sbin,lib}
+chmod 1777 "$ROOTFS_DIR/tmp"
+\end{lstlisting}
+
+\subsection{Shared libraries and the dynamic loader}
+
+Even though the AULinux-authored binaries (\code{au-init}, \code{auutils},
+\code{aupkg}) are all fully statically linked, the rootfs also ships several
+\emph{host} utilities --- \code{tar}, \code{gzip}, \code{dhcpcd} --- that are
+dynamically linked against glibc. These binaries require the dynamic loader
+\code{ld-linux-x86-64.so.2} and a set of \code{.so} files to be present inside
+the rootfs itself, because there is no host filesystem to fall back on once the
+initramfs is running.
+
+The script copies the loader and the required libraries using \code{cp -L},
+which dereferences symlinks so the real versioned \code{.so} files land in
+\file{rootfs/lib/} rather than dangling symlinks:
+
+\begin{lstlisting}[language=bash, caption={make\_rootfs.sh --- loader, core glibc libs, and host-utility libs}]
+cp -L /lib64/ld-linux-x86-64.so.2       "$ROOTFS_DIR/lib64/"
+cp -L /lib/x86_64-linux-gnu/libc.so.6   "$ROOTFS_DIR/lib/"
+cp -L /lib/x86_64-linux-gnu/libm.so.6   "$ROOTFS_DIR/lib/"
+cp -L /lib/x86_64-linux-gnu/libresolv.so.2  "$ROOTFS_DIR/lib/"
+cp -L /lib/x86_64-linux-gnu/librt.so.1  "$ROOTFS_DIR/lib/"
+cp -L /lib/x86_64-linux-gnu/libdl.so.2  "$ROOTFS_DIR/lib/"
+cp -L /lib/x86_64-linux-gnu/libpthread.so.0 "$ROOTFS_DIR/lib/"
+
+# Extra libraries required by host utilities (like tar)
+cp -L /usr/lib/x86_64-linux-gnu/libacl.so.1    "$ROOTFS_DIR/lib/"
+cp -L /usr/lib/x86_64-linux-gnu/libselinux.so.1 "$ROOTFS_DIR/lib/"
+cp -L /usr/lib/x86_64-linux-gnu/libpcre2-8.so.0 "$ROOTFS_DIR/lib/"
+
+# Canonical compatibility symlink so /lib and /lib64 agree on the loader
+ln -sf /lib64/ld-linux-x86-64.so.2 "$ROOTFS_DIR/lib/ld-linux-x86-64.so.2"
+\end{lstlisting}
+
+The following table lists every library copied in this section and why it is
+needed:
+
+\begin{table}[h]
+\centering
+\caption{Shared libraries copied into \file{rootfs/lib/} and their purpose.}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Library} & \textbf{Purpose} \\
+\midrule
+\file{ld-linux-x86-64.so.2} & ELF dynamic linker/loader --- required by every dynamically linked binary \\
+\file{libc.so.6}             & GNU C library --- core POSIX and C standard library \\
+\file{libm.so.6}             & Math library (\code{sin}, \code{cos}, \code{sqrt}, \ldots) \\
+\file{libresolv.so.2}        & DNS resolver routines used by networking code \\
+\file{librt.so.1}            & POSIX real-time extensions (clocks, message queues) \\
+\file{libdl.so.2}            & \code{dlopen}/\code{dlsym} --- runtime shared-library loading \\
+\file{libpthread.so.0}       & POSIX threads \\
+\file{libacl.so.1}           & POSIX ACL support, required by \code{tar} \\
+\file{libselinux.so.1}       & SELinux label APIs, linked by \code{tar} on SELinux-capable hosts \\
+\file{libpcre2-8.so.0}       & PCRE2 regex library, a dependency of \code{libselinux} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{warnbox}[Host-architecture coupling]
+These paths are hard-coded for a Debian/Ubuntu \code{x86\_64} host
+(\file{/lib/x86\_64-linux-gnu/...}). On a different distribution, a non-glibc
+host, or a non-\code{x86\_64} architecture, these copies will fail under
+\code{set -e} and abort \file{make\_rootfs.sh}. The rootfs is not portable
+across host layouts as written.
+\end{warnbox}
+
+\subsection{Host archivers: \code{tar} and \code{gzip}}
+
+After the shared libraries are in place, the script copies two host archiving
+utilities directly into \file{rootfs/bin/}:
+
+\begin{lstlisting}[language=bash, caption={make\_rootfs.sh --- copying host tar and gzip into the rootfs}]
+cp -L /usr/bin/tar  "$ROOTFS_DIR/bin/"
+cp -L /usr/bin/gzip "$ROOTFS_DIR/bin/"
+\end{lstlisting}
+
+\code{aupkg} relies on \code{tar} and \code{gzip} to unpack \file{.tar.gz}
+package archives at install time. Rather than building these tools from source,
+the script reuses the host binaries, which are dynamically linked --- hence the
+glibc and \code{libacl}/\code{libselinux}/\code{libpcre2} libraries copied
+above are a prerequisite for \code{tar} to function inside the initramfs.
+
+\subsection{DHCP client setup}
+
+Networking support is delivered by copying a real DHCP client from the host
+system. The script probes four possible locations in order:
+
+\begin{lstlisting}[language=bash, caption={make\_rootfs.sh --- probing for and copying the DHCP client}]
+if [ -f "/usr/sbin/dhcpcd" ]; then   DHCP_CLIENT="/usr/sbin/dhcpcd"
+elif [ -f "/sbin/dhcpcd" ]; then     DHCP_CLIENT="/sbin/dhcpcd"
+elif [ -f "/sbin/dhclient" ]; then   DHCP_CLIENT="/sbin/dhclient"
+elif [ -f "/usr/sbin/dhclient" ]; then DHCP_CLIENT="/usr/sbin/dhclient"
+fi
+
+if [ -n "$DHCP_CLIENT" ]; then
+    cp -L "$DHCP_CLIENT" "$ROOTFS_DIR/sbin/dhcpcd"
+    chmod +x "$ROOTFS_DIR/sbin/dhcpcd"
+    # Crypto and compression libraries that dhcpcd links against
+    [ -f "/usr/lib/x86_64-linux-gnu/libcrypto.so.3" ] && \
+        cp -L /usr/lib/x86_64-linux-gnu/libcrypto.so.3 "$ROOTFS_DIR/lib/"
+    [ -f "/usr/lib/x86_64-linux-gnu/libz.so.1" ] && \
+        cp -L /usr/lib/x86_64-linux-gnu/libz.so.1 "$ROOTFS_DIR/lib/"
+    [ -f "/usr/lib/x86_64-linux-gnu/libzstd.so.1" ] && \
+        cp -L /usr/lib/x86_64-linux-gnu/libzstd.so.1 "$ROOTFS_DIR/lib/"
+fi
+\end{lstlisting}
+
+Whichever client is found, it is installed as \file{/sbin/dhcpcd} inside the
+rootfs, normalising the name so init's service table can refer to it by a
+single well-known path. The additional libraries (\code{libcrypto},
+\code{libz}, \code{libzstd}) are guarded with \code{[ -f ... ]} so a missing
+library does not abort the build --- they are only needed if \code{dhcpcd}
+actually links against them on the particular host.
+
+\subsection{The \code{services.conf} service table and DNS}
+
+AULinux's init reads \file{/etc/aulinux/services.conf} to learn which
+long-running daemons to supervise. Previously this file was written as an
+empty stub. It now contains a real entry:
+
+\begin{lstlisting}[language=bash, caption={make\_rootfs.sh --- writing services.conf with the DHCP client entry}]
+cat > "$ROOTFS_DIR/etc/aulinux/services.conf" << EOF
+# AULinux Services Configuration
+# Format: name=executable args
+dhcpcd=/sbin/dhcpcd -B
+EOF
+\end{lstlisting}
+
+The \code{-B} flag runs \code{dhcpcd} in the \emph{foreground} (no fork-to-
+background), which is the correct mode for a process supervised by an init
+system --- init can observe the process, detect exits, and restart it.
+
+DNS resolution is configured by writing a static \file{/etc/resolv.conf} with
+two public resolvers:
+
+\begin{lstlisting}[language=bash, caption={make\_rootfs.sh --- configuring public DNS via resolv.conf}]
+cat > "$ROOTFS_DIR/etc/resolv.conf" << EOF
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+EOF
+\end{lstlisting}
+
+Together, the DHCP client entry in \file{services.conf} (which acquires a
+dynamic IP address on \code{eth0}) and the static \file{resolv.conf} (which
+provides name resolution) give AULinux a functional TCP/IP stack on first boot
+with no manual configuration.
+
+\subsection{Wiring \code{/init}}
+
+The kernel, after unpacking the initramfs, executes \file{/init} by default.
+AULinux installs the C init binary to \file{/sbin/init} and then creates a
+top-level \file{/init} symlink pointing at it, satisfying both the initramfs
+convention and the more traditional \file{/sbin/init} location:
+
+\begin{lstlisting}[language=bash, caption={make\_rootfs.sh --- installing init and the /init entry point}]
+if [ -f "$BUILD_DIR/init/au-init" ]; then
+    cp "$BUILD_DIR/init/au-init" "$ROOTFS_DIR/sbin/init"
+    ln -sf /sbin/init "$ROOTFS_DIR/init"
+    echo "Installed init"
+else
+    echo "Warning: au-init not found in build/"
+fi
+\end{lstlisting}
+
+\subsection{Placing userland, shell, and package manager}
+
+The whole \file{build/utils/} directory --- the \code{auutils} binary
+\emph{and} its symlink farm --- is copied into \file{/bin} with \code{cp -d}
+so the symlinks are preserved rather than dereferenced. The package manager
+goes to \file{/usr/bin/aupkg} with a convenience symlink in \file{/bin}. The
+shell needs no separate copy: it already arrived as the \code{aush}/\code{sh}
+symlinks inside \file{build/utils/}, and the script explicitly recognizes this
+case (``Shell is integrated into utilities'').
+
+\begin{lstlisting}[language=bash, caption={make\_rootfs.sh --- installing utils (symlink-preserving) and aupkg}]
+if [ -d "$BUILD_DIR/utils" ]; then
+    cp -d "$BUILD_DIR/utils/"* "$ROOTFS_DIR/bin/" 2>/dev/null || true
+    echo "Installed utilities"
+fi
+
+if [ -f "$BUILD_DIR/pkg-manager/aupkg" ]; then
+    cp "$BUILD_DIR/pkg-manager/aupkg" "$ROOTFS_DIR/usr/bin/aupkg"
+    ln -sf /usr/bin/aupkg "$ROOTFS_DIR/bin/aupkg"
+    echo "Installed package manager"
+fi
+\end{lstlisting}
+
+\subsection{System configuration}
+
+The script then writes the minimal set of configuration files a Unix system
+expects --- \file{/etc/hostname}, \file{/etc/passwd}, \file{/etc/group}, and
+\file{/etc/fstab} --- guarding the account files with \code{[ ! -f ... ]} so a
+hand-customized version is never clobbered:
+
+\begin{lstlisting}[language=bash, caption={make\_rootfs.sh --- baseline accounts and mount table}]
+echo "aulinux" > "$ROOTFS_DIR/etc/hostname"
+
+cat > "$ROOTFS_DIR/etc/passwd" << EOF
+root:x:0:0:root:/root:/bin/aush
+guest:x:1000:1000:guest:/home/guest:/bin/aush
+EOF
+
+cat > "$ROOTFS_DIR/etc/fstab" << EOF
+proc             /proc         proc    defaults   0    0
+sysfs            /sys          sysfs   defaults   0    0
+EOF
+\end{lstlisting}
+
+Both accounts use \file{/bin/aush} as their login shell --- the same multicall
+binary. The \file{fstab} declares the two pseudo-filesystems init will mount.
+
+\subsection{Seeding the package repository and the desktop/installer layer}
+
+Finally, \file{make\_rootfs.sh} populates an on-image package repository under
+\file{/var/lib/aupkg} and installs optional desktop and installer components.
+Each invocation is guarded by a \code{[ -f ... ]} test so the build continues
+even if a helper script is absent:
+
+\begin{lstlisting}[language=bash, caption={make\_rootfs.sh --- package repo population and optional desktop/installer layer}]
+# 1. Mock graphics skeleton
+if [ -f "$PROJECT_ROOT/scripts/populate_graphics_repo.sh" ]; then
+    "$PROJECT_ROOT/scripts/populate_graphics_repo.sh"
+fi
+# 2. Overwrite with real host-extracted graphics binaries
+if [ -f "$PROJECT_ROOT/scripts/build_real_graphics_packages.py" ]; then
+    python3 "$PROJECT_ROOT/scripts/build_real_graphics_packages.py"
+fi
+# 3. Networking and SSH packages
+if [ -f "$PROJECT_ROOT/scripts/build_networking_packages.py" ]; then
+    python3 "$PROJECT_ROOT/scripts/build_networking_packages.py"
+fi
+# 4. Desktop environments (GNOME, Plasma, ...)
+if [ -f "$PROJECT_ROOT/scripts/build_desktop_environments.py" ]; then
+    python3 "$PROJECT_ROOT/scripts/build_desktop_environments.py"
+fi
+# 5. Desktop launcher and OS installer wizard
+if [ -f "$PROJECT_ROOT/scripts/start_desktop.sh" ]; then
+    cp "$PROJECT_ROOT/scripts/start_desktop.sh" "$ROOTFS_DIR/bin/start_desktop.sh"
+    chmod +x "$ROOTFS_DIR/bin/start_desktop.sh"
+    ln -sf start_desktop.sh "$ROOTFS_DIR/bin/start_desktop"
+fi
+if [ -f "$PROJECT_ROOT/scripts/install_os.sh" ]; then
+    cp "$PROJECT_ROOT/scripts/install_os.sh" "$ROOTFS_DIR/bin/au-install"
+    chmod +x "$ROOTFS_DIR/bin/au-install"
+    ln -sf au-install "$ROOTFS_DIR/bin/install-os"
+fi
+\end{lstlisting}
+
+\begin{notebox}[The seeded packages are mock content]
+\file{populate\_graphics\_repo.sh} and the \file{build\_*.py} helpers do not
+compile real upstream software. They construct \emph{mock} package payloads
+--- small shell stubs and placeholder \code{.so} files --- \code{tar.gz} them
+into \file{/var/lib/aupkg/packages/}, and merge rich JSON metadata
+(\code{name}, \code{version}, \code{dependencies}, \code{license},
+\code{installed\_size}, \ldots) into \file{repo.db}. Their value is exercising
+\code{aupkg}'s dependency resolution and install machinery end-to-end (for
+example \code{openbox} $\rightarrow$ \code{xorg-server} $\rightarrow$
+\code{libinput}), not shipping a working X11 stack. The repository covers a
+graphics layer (libinput, xorg-server, xf86-video-fbdev, openbox), GUI
+libraries and apps (cairo, pango, libgtk-3, firefox, vscode), a Wayland stack
+(libwayland, wayland-protocols, weston), an XFCE desktop (xfce4-session,
+thunar, alacritty), desktop environments (GNOME, Plasma), and networking tools
+(busybox, dropbear, openssh).
+\end{notebox}
+
+\section{Booting in QEMU (\file{run\_qemu.sh})}
+
+\file{run\_qemu.sh} is the one-command path from source tree to a running
+system. It is fully automated and chains every prior stage. Its phases are:
+
+\begin{enumerate}
+  \item \textbf{Build} --- runs \code{scripts/build.sh all}.
+  \item \textbf{Rootfs} --- deletes and regenerates \file{rootfs/} via
+        \code{make\_rootfs.sh}.
+  \item \textbf{Kernel acquisition} --- AULinux ships no kernel of its own, so
+        the script tries, in order: a pre-downloaded Alpine
+        \file{vmlinuz-virt}; the host's \file{/boot/vmlinuz}; the versioned
+        \file{/boot/vmlinuz-\$(uname -r)}; an \code{apt-get download} of the
+        host kernel package (extracted with \code{dpkg-deb -x}); and finally a
+        download of a minimal Alpine virtual kernel over the network.
+  \item \textbf{Initramfs packaging} --- packs \file{rootfs/} into a gzipped
+        cpio archive.
+  \item \textbf{Boot} --- launches QEMU.
+\end{enumerate}
+
+\subsection{Why initramfs, and how it is packed}
+
+The boot image is an \textbf{initramfs}, not an ext4 disk. An initramfs is a
+\code{cpio} archive that the kernel unpacks into an in-memory \code{tmpfs} and
+then executes \file{/init} from directly --- there is no block device, no
+mounting, no filesystem driver required to reach userspace. That makes it the
+simplest possible thing to boot under an emulator. The archive uses the
+\code{newc} (SVR4) cpio format the kernel expects, gzip-compressed:
+
+\begin{lstlisting}[language=bash, caption={run\_qemu.sh --- packing the rootfs into a gzipped newc cpio initramfs}]
+info "Packaging rootfs into initramfs.img..."
+cd "$ROOTFS_DIR"
+find . -print0 | cpio --null -ov --format=newc | gzip -9 > "$INITRAMFS_FILE"
+cd "$PROJECT_ROOT"
+\end{lstlisting}
+
+\begin{infobox}[initramfs vs. rootfs-on-disk]
+The same \file{rootfs/} tree feeds two different boot strategies. Packed as a
+cpio initramfs (this script) it boots entirely from RAM --- ideal for QEMU.
+Copied onto an ext4 partition (\file{install\_grub.sh}, next section) it
+becomes a persistent on-disk root filesystem. AULinux supports both from one
+source of truth.
+\end{infobox}
+
+\subsection{The QEMU invocation}
+
+QEMU is given the kernel and the initramfs directly, bypassing any bootloader.
+There are two modes selected by a \code{--gui} flag:
+
+\begin{lstlisting}[language=bash, caption={run\_qemu.sh --- serial-console (default) and graphical QEMU launches}]
+# Default: serial console, no window
+qemu-system-x86_64 \
+    -kernel "$KERNEL_FILE" \
+    -initrd "$INITRAMFS_FILE" \
+    -append "init=/sbin/init console=ttyS0 quiet" \
+    -nographic \
+    -m 512M
+
+# With --gui: graphical output
+qemu-system-x86_64 \
+    -kernel "$KERNEL_FILE" \
+    -initrd "$INITRAMFS_FILE" \
+    -append "init=/sbin/init quiet" \
+    -m 512M
+\end{lstlisting}
+
+Each flag does specific work:
+
+\begin{itemize}
+  \item \code{-kernel} loads the bzImage directly (QEMU acts as a Linux
+        loader, so no GRUB is needed for emulation).
+  \item \code{-initrd} hands the kernel the gzipped cpio as the initial
+        ramdisk.
+  \item \code{-append} sets the kernel command line. \code{init=/sbin/init}
+        tells the kernel which program to run as PID~1 (overriding the
+        \file{/init} default); \code{console=ttyS0} redirects the console to
+        the first serial port so it appears in the terminal; \code{quiet}
+        suppresses verbose kernel logging.
+  \item \code{-nographic} (default mode) drops the graphical window and wires
+        the VM's serial port to the host terminal --- the script reminds the
+        user to exit with \code{Ctrl+A} then \code{X}.
+  \item \code{-m 512M} allocates 512\,MiB of guest RAM, which must comfortably
+        hold the decompressed initramfs plus shared libraries and archivers.
+\end{itemize}
+
+\subsection{Assembling a desktop session}
+
+When a graphical session is wanted, \file{start\_desktop.sh} (installed into
+\file{/bin}) orchestrates it from inside the running system. It exports
+\code{PATH}, \code{LD\_LIBRARY\_PATH}, \code{HOME}, and \code{DISPLAY=:0}; uses
+\code{aupkg install openbox xf86-video-fbdev} to pull in the graphics stack
+(relying on \code{aupkg}'s dependency resolution to also bring in
+\code{xorg-server} and \code{libinput}); starts \code{Xorg :0} against an
+\code{fbdev} configuration; and finally launches the \code{openbox} window
+manager. Because the seeded packages are mock stubs (see the note above), this
+demonstrates the install-and-launch \emph{flow} rather than rendering a real
+desktop.
+
+\section{Bootable Live ISO (\file{build\_iso.sh})}
+
+\file{build\_iso.sh} extends the QEMU path into a distributable, bootable ISO
+image suitable for writing to USB media or running in a full VM. It requires
+\code{grub-mkrescue} (from \code{grub-common} / \code{grub-pc-bin}) and
+\code{xorriso}, and chains every prior stage automatically:
+
+\begin{enumerate}
+  \item Calls \code{build.sh all} to compile all components.
+  \item Calls \code{make\_rootfs.sh} to assemble a fresh \file{rootfs/}.
+  \item Obtains a kernel using the same waterfall as \file{run\_qemu.sh}
+        (pre-downloaded, host \file{/boot/vmlinuz}, versioned fallback,
+        or Alpine download).
+  \item Packs \file{rootfs/} into \file{build/initramfs.img} via
+        \code{find | cpio | gzip}.
+  \item Stages \file{boot/vmlinuz} and \file{boot/initramfs.img} under a
+        temporary \file{build/iso\_tmp/} tree alongside a custom GRUB
+        configuration.
+  \item Calls \code{grub-mkrescue -o build/aulinux.iso build/iso\_tmp/}.
+\end{enumerate}
+
+The embedded \file{grub.cfg} offers three boot menu entries:
+
+\begin{lstlisting}[language=bash, caption={build\_iso.sh --- GRUB menu entries embedded in the ISO}]
+menuentry "AULinux Live OS (Console Mode)" {
+    linux /boot/vmlinuz init=/sbin/init console=ttyS0 console=tty0 quiet
+    initrd /boot/initramfs.img
+}
+menuentry "AULinux Live OS (Graphical Mode - Openbox)" {
+    linux /boot/vmlinuz init=/sbin/init quiet
+    initrd /boot/initramfs.img
+}
+menuentry "Install AULinux to Hard Disk (Interactive Wizard)" {
+    linux /boot/vmlinuz init=/bin/install-os quiet
+    initrd /boot/initramfs.img
+}
+\end{lstlisting}
+
+The third entry boots directly into \file{/bin/install-os} (the
+\code{install\_os.sh} wizard) as PID~1 instead of the normal init, providing a
+dedicated installer path on the live media.
+
+\section{The OS Installation Wizard (\file{install\_os.sh})}
+
+\file{install\_os.sh} is the interactive installation wizard that the
+\code{build\_iso.sh} live media boots into when the user selects ``Install
+AULinux to Hard Disk''. It is copied into \file{rootfs/bin/au-install} (with a
+\file{/bin/install-os} symlink) by \file{make\_rootfs.sh}. The wizard walks
+through the canonical installation steps:
+
+\begin{itemize}
+  \item Scans and lists available storage drives.
+  \item Accepts a target disk selection (defaulting to \code{/dev/sda}).
+  \item Partitions the target with a single bootable ext4 partition.
+  \item Formats the partition and reports its UUID.
+  \item Copies the AULinux filesystem contents to \file{/mnt} in stages
+        (dynamic loader and glibc, utilities, init, \code{aupkg} and its
+        repository database, package archives).
+  \item Installs GRUB to the target MBR and writes \file{/mnt/boot/grub/grub.cfg}.
+\end{itemize}
+
+\begin{notebox}[The wizard is a demonstrator, not a production installer]
+\file{install\_os.sh} is written in plain \code{/bin/sh} and simulates each
+step with \code{sleep} delays and \code{echo} output rather than calling
+\code{parted}, \code{mkfs.ext4}, or \code{grub-install} for real. Its purpose
+is to exercise the full boot path --- booting the ISO, reaching the installer
+as PID~1, and displaying a credible installation flow --- rather than to write
+a working disk. A real installer would replace the \code{echo}/\code{sleep}
+stubs with the actual partitioning commands.
+\end{notebox}
+
+\section{Bootloader Installation (\file{install\_grub.sh})}
+
+For a persistent, bootable-on-real-hardware (or full-VM) image, GRUB must be
+installed onto a disk image. \file{install\_grub.sh} targets a 512\,MiB
+\code{msdos}/ext4 image. Crucially, it is \textbf{semi-manual by design}: it
+prints the exact sequence of root-only, loop-device operations and only
+executes them automatically if it detects it is running as root.
+
+\begin{lstlisting}[language=bash, caption={install\_grub.sh --- the documented disk-image and GRUB sequence}]
+# 1. Create disk image:
+dd if=/dev/zero of=$IMAGE_FILE bs=1M count=512
+# 2. Partition image:
+parted $IMAGE_FILE --script mklabel msdos mkpart primary ext4 1MiB 100% set 1 boot on
+# 3. Format & mount via loop device:
+LOOPDEV=$(losetup -fP --show $IMAGE_FILE)
+mkfs.ext4 ${LOOPDEV}p1 ; mount ${LOOPDEV}p1 /mnt
+# 4. Copy rootfs:    cp -a $ROOTFS_DIR/* /mnt/
+# 5. Copy kernel:    cp $KERNEL_FILE /mnt/boot/vmlinuz ; cp $INITRAMFS_FILE /mnt/boot/initramfs.img
+# 6. Install GRUB:
+grub-install --target=i386-pc --boot-directory=/mnt/boot ${LOOPDEV}
+cp bootloader/grub.cfg /mnt/boot/grub/grub.cfg
+\end{lstlisting}
+
+The \code{--target=i386-pc} selects legacy BIOS GRUB (not UEFI), installed to
+the loop device's MBR. The matching \file{bootloader/grub.cfg} is short and
+uses the \code{linux}/\code{initrd} commands to load the same two artifacts
+the QEMU path used, but now from an on-disk \file{root=/dev/sda1}:
+
+\begin{lstlisting}[language=bash, caption={bootloader/grub.cfg --- the AULinux boot menu entry}]
+set timeout=5
+set default=0
+
+menuentry "AULinux" {
+    linux /boot/vmlinuz root=/dev/sda1 rw quiet init=/sbin/init
+    initrd /boot/initramfs.img
+}
+\end{lstlisting}
+
+\begin{warnbox}[This step is not fully automated and is not idempotent]
+\file{install\_grub.sh} requires \code{root}, \code{losetup}, \code{parted},
+\code{mkfs.ext4}, and \code{grub-install}. When not run as root it only
+\emph{prints} the recipe --- nothing happens to disk. When run as root it
+prompts interactively before touching loop devices and mounting under
+\file{/mnt}. There is no rollback if a step fails midway, so treat it as an
+operator-assisted procedure rather than a hands-off build stage.
+\end{warnbox}
+
+\section{Verification (\file{verify.sh})}
+
+\file{verify.sh} is a fast smoke test run against \file{build/} (before any
+rootfs is built) that confirms the three core binaries actually execute and
+behave. It checks:
+
+\begin{itemize}
+  \item \textbf{auutils} --- that \code{pwd} returns the real working
+        directory, that \code{echo} round-trips a string, and that \code{ls}
+        exits cleanly.
+  \item \textbf{aush} --- that the \code{aush} symlink exists, that
+        \code{--version} reports ``aush (AULinux Shell)'', and that
+        command-mode \code{aush -c "echo ..."} works.
+  \item \textbf{aupkg} --- that the binary exists, that \code{--version}
+        reports ``aupkg 1.0.0'', and that \code{aupkg list} runs without
+        crashing.
+\end{itemize}
+
+\begin{lstlisting}[language=bash, caption={verify.sh --- representative behavioral checks}]
+# Test command execution mode (-c)
+SHELL_EXEC=$("$BUILD_DIR/utils/aush" -c "echo 'Shell Command Execution Mode works!'" 2>&1)
+if [ "$SHELL_EXEC" = "Shell Command Execution Mode works!" ]; then
+    success "aush command execution (-c) works correctly"
+else
+    error "aush command execution failed, output: '$SHELL_EXEC'"
+    exit 1
+fi
+\end{lstlisting}
+
+These are genuine functional assertions, not mere ``does the file exist''
+checks --- a failed assertion exits non-zero, making \file{verify.sh} suitable
+as a CI gate after \code{build.sh all}.
+
+\section{Reproducibility and Limitations}
+
+The pipeline makes a real effort at reproducibility --- \code{-trimpath},
+\code{-buildid=}, stripped symbols, \code{CGO\_ENABLED=0},
+\code{-extldflags '-static'}, and pinned Rust target triples all reduce
+build-to-build variance. But honesty requires naming what is automated versus
+manual, and what the scripts assume about the host:
+
+\begin{itemize}
+  \item \textbf{Host coupling.} \file{make\_rootfs.sh} hard-codes
+        Debian/Ubuntu \code{x86\_64} library paths. Other distributions,
+        libc implementations, or architectures will break the library-copy
+        stage.
+  \item \textbf{No bundled kernel.} AULinux does not build a kernel.
+        \file{run\_qemu.sh} and \file{build\_iso.sh} scavenge one from the host
+        or download an Alpine \code{vmlinuz-virt}, so a boot may require
+        network access and the exact kernel varies by machine.
+  \item \textbf{Kernel modules are optional and host-dependent.} They build
+        only with matching kernel headers; otherwise the build warns and
+        continues without them.
+  \item \textbf{Seeded packages are mocks.} The graphics/GUI/Wayland/XFCE/
+        desktop-environment/networking repositories contain stub payloads to
+        exercise \code{aupkg}, not functional upstream software.
+  \item \textbf{GRUB install is operator-assisted.} \file{install\_grub.sh}
+        needs root and loop devices and is interactive; the QEMU and ISO paths
+        are the fully automated ones.
+  \item \textbf{DHCP client is host-sourced.} \file{make\_rootfs.sh} copies
+        whatever DHCP client is installed on the build host. If none is found,
+        the rootfs boots without a DHCP daemon and network must be configured
+        manually.
+\end{itemize}
+
+\begin{infobox}[The end-to-end path, in one breath]
+\code{run\_qemu.sh} $\rightarrow$ \code{build.sh all} (init, utils/shell,
+aupkg, kernel modules into \file{build/}) $\rightarrow$ \code{make\_rootfs.sh}
+(FHS tree, static binaries, glibc + host archivers, DHCP client, DNS config,
+\code{services.conf} with supervised \code{dhcpcd}, seeded \code{aupkg} repo
+into \file{rootfs/}) $\rightarrow$ \code{find | cpio --format=newc | gzip}
+(gzipped-cpio initramfs) $\rightarrow$ \code{qemu-system-x86\_64 -kernel
+-initrd -append "init=/sbin/init ..."} --- a running, network-capable AULinux
+on a serial console, from one command.
+\end{infobox}

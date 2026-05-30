@@ -79,7 +79,7 @@ build_utils() {
     cd "$PROJECT_ROOT"
 
     info "Compiling auutils..."
-    go build -ldflags="-s -w -buildid=" -trimpath -o "$BUILD_DIR/utils/auutils" utils/main.go
+    CGO_ENABLED=0 go build -ldflags="-s -w -buildid= -extldflags '-static'" -trimpath -o "$BUILD_DIR/utils/auutils" utils/main.go
 
     # Compression (Optional)
     if command -v upx >/dev/null; then
@@ -103,9 +103,9 @@ build_utils() {
 build_pkgmanager() {
     info "Building package manager (aupkg)..."
     cd "$PROJECT_ROOT/pkg-manager"
-    cargo build --release
+    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target x86_64-unknown-linux-gnu
     mkdir -p "$BUILD_DIR/pkg-manager"
-    cp target/release/aupkg "$BUILD_DIR/pkg-manager/"
+    cp target/x86_64-unknown-linux-gnu/release/aupkg "$BUILD_DIR/pkg-manager/"
     success "Package manager built"
 }
 

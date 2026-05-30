@@ -1,0 +1,567 @@
+\chapter{Dynamic Kernel Extensions}
+\label{chap:kernel}
+
+The Linux kernel is a monolith, but it is a \emph{programmable} monolith. AULinux
+deliberately ships an unmodified upstream kernel and layers its distinctive
+behaviour on top through three small, self-contained Loadable Kernel Modules
+(LKMs): \file{aulinux\_core}, \file{aulinux\_procmon}, and \file{aulinux\_sysctl}.
+Each is an out-of-tree module compiled against the running kernel's headers and
+loaded at boot. This chapter dissects what those modules \emph{actually} do —
+line by line — and is explicit about which parts are production-ready and which
+are scaffolding awaiting completion.
+
+\begin{infobox}[The three modules at a glance]
+\code{aulinux\_core} surfaces version telemetry under \file{/proc/aulinux};
+\code{aulinux\_procmon} counts process lifecycle events via kprobes and exposes
+them under \file{/proc/aulinux/procmon}; \code{aulinux\_sysctl} registers runtime
+tunables under \file{/proc/sys/aulinux/} and exports two symbols that the other
+modules consume. All three are GPL-licensed and authored by ``AULinux Team''.
+\end{infobox}
+
+\section{Why Modules Instead of Patching the Kernel}
+
+There are two ways to add behaviour to Linux: patch the source tree and ship a
+custom kernel, or write loadable modules that bolt onto a stock kernel at
+runtime. AULinux chooses the latter, and the rationale is worth stating plainly.
+
+\begin{itemize}
+  \item \textbf{Decoupling from the upstream release cadence.} A forked kernel
+        must be re-patched and re-tested against every upstream security fix. An
+        out-of-tree module only needs to compile against the kernel's exported
+        headers, so AULinux can ride stock kernel updates with far less churn.
+  \item \textbf{Smaller blast radius.} A bug in a module that fails to load
+        leaves a bootable system; a bug baked into \code{vmlinux} may not.
+  \item \textbf{Runtime composability.} Modules can be \code{insmod}'d and
+        \code{rmmod}'d independently, which is exactly how the AULinux build and
+        test scripts exercise them.
+\end{itemize}
+
+\begin{notebox}[The module ABI is only ``stable-ish'']
+Linux offers \emph{no} stable in-kernel ABI. Symbols, struct layouts, and even
+the signatures of hookable functions change between releases. Out-of-tree
+modules pay for their decoupling by being recompiled against each new kernel —
+and, as we will see with \code{aulinux\_procmon}, by occasionally targeting
+kernel internals (like \code{do\_fork}) that have been renamed or removed
+upstream.
+\end{notebox}
+
+\section{The Shared Interface: \file{aulinux.h}}
+
+All three modules are meant to share a single header, \file{aulinux.h}, which
+defines the project's common vocabulary. It pulls in only \code{<linux/types.h>}
+and is guarded by the conventional \code{\_AULINUX\_H} include guard.
+
+\begin{lstlisting}[language=C, caption={Versioning and feature flags from aulinux.h}]
+/* Version information */
+#define AULINUX_VERSION_MAJOR  1
+#define AULINUX_VERSION_MINOR  0
+#define AULINUX_VERSION_PATCH  0
+#define AULINUX_VERSION_STRING "1.0.0"
+
+/* Feature flags (for aulinux_feature_enabled) */
+#define AULINUX_FEATURE_PROCMON     (1 << 0)  /* Process monitoring */
+#define AULINUX_FEATURE_AUDIT       (1 << 1)  /* Security auditing */
+#define AULINUX_FEATURE_SANDBOX     (1 << 2)  /* Process sandboxing */
+#define AULINUX_FEATURE_NETMON      (1 << 3)  /* Network monitoring */
+\end{lstlisting}
+
+The header's most load-bearing contribution is the cross-module contract. It
+declares two functions as \code{extern} and provides logging macros that gate
+debug output on a runtime level:
+
+\begin{lstlisting}[language=C, caption={Cross-module declarations and level-gated logging (aulinux.h, lines 30--48)}]
+/* External function declarations (from aulinux_sysctl.c) */
+extern int aulinux_get_debug_level(void);
+extern int aulinux_feature_enabled(int flag);
+
+/* Logging macros with debug level checking */
+#define aulinux_pr_debug(level, fmt, ...) \
+    do { \
+        if (aulinux_get_debug_level() >= (level)) \
+            pr_debug("AULinux: " fmt, ##__VA_ARGS__); \
+    } while (0)
+
+#define aulinux_pr_info(fmt, ...)  pr_info("AULinux: " fmt, ##__VA_ARGS__)
+#define aulinux_pr_warn(fmt, ...)  pr_warn("AULinux: " fmt, ##__VA_ARGS__)
+#define aulinux_pr_err(fmt, ...)   pr_err("AULinux: " fmt, ##__VA_ARGS__)
+\end{lstlisting}
+
+The header also reserves an IOCTL command space (magic byte \code{'A'} with
+\code{GET\_VERSION}, \code{GET\_FEATURES}, \code{SET\_FEATURES}), a set of size
+limits (\code{AULINUX\_MAX\_NAME\_LEN}, \code{AULINUX\_MAX\_PATH\_LEN},
+\code{AULINUX\_MAX\_PROCESSES}), and a small return-code enumeration
+(\code{AULINUX\_SUCCESS} through \code{AULINUX\_ERR\_BUSY}).
+
+\begin{notebox}[Header is aspirational in part]
+The IOCTL command numbers, the feature-flag bitfield names, and the
+\code{AULINUX\_ERR\_*} return codes are \emph{declared but not yet used} by any
+of the three modules. No module currently registers a character device or
+implements an \code{.unlocked\_ioctl} handler, so the IOCTL interface is a
+forward-looking placeholder. Only \code{aulinux\_get\_debug\_level()} and
+\code{aulinux\_feature\_enabled()} are wired up — and notably, \file{aulinux.h}
+is \code{\#include}d only by \file{aulinux\_sysctl.c}; the other two modules do
+not yet consume the shared logging macros.
+\end{notebox}
+
+\section{\code{aulinux\_core}: The Telemetry Anchor}
+
+\file{aulinux\_core.c} is the foundational module. Its single responsibility is
+to establish the \file{/proc/aulinux} directory and publish a read-only
+\file{version} file inside it. It is small, correct, and complete.
+
+\subsection{Module Metadata}
+
+The module identifies itself with the standard \code{MODULE\_*} macros. The
+license string \code{"GPL"} is significant: it grants the module access to
+GPL-only exported kernel symbols.
+
+\begin{lstlisting}[language=C, caption={Module metadata (aulinux\_core.c, lines 16--22)}]
+#define AULINUX_VERSION "1.0.0"
+#define AULINUX_PROC_NAME "aulinux"
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("AULinux Team");
+MODULE_DESCRIPTION("AULinux Core Kernel Module");
+MODULE_VERSION(AULINUX_VERSION);
+\end{lstlisting}
+
+\subsection{The \code{proc\_ops} / \code{seq\_file} Pattern}
+
+Modern kernels (5.6+) replaced the old \code{file\_operations} struct for
+\file{/proc} entries with a leaner \code{struct proc\_ops}. AULinux uses it
+together with the \code{seq\_file} helper API, which is the idiomatic way to emit
+small, formatted, read-only text from the kernel without manually juggling user
+buffers and offsets.
+
+\begin{lstlisting}[language=C, caption={The version producer and its proc\_ops (aulinux\_core.c, lines 31--51)}]
+static int aulinux_version_show(struct seq_file *m, void *v)
+{
+    seq_printf(m, "AULinux Version: %s\n", AULINUX_VERSION);
+    seq_printf(m, "Kernel Version: %d.%d.%d\n",
+               LINUX_VERSION_MAJOR,
+               LINUX_VERSION_PATCHLEVEL,
+               LINUX_VERSION_SUBLEVEL);
+    return 0;
+}
+
+static int aulinux_version_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, aulinux_version_show, NULL);
+}
+
+static const struct proc_ops aulinux_version_ops = {
+    .proc_open    = aulinux_version_open,
+    .proc_read    = seq_read,
+    .proc_lseek   = seq_lseek,
+    .proc_release = single_release,
+};
+\end{lstlisting}
+
+The flow is worth tracing because every \file{/proc} entry in the AULinux
+modules follows it. When userspace \code{open()}s the file, the kernel calls
+\code{aulinux\_version\_open}, which registers \code{aulinux\_version\_show} as a
+single-shot producer via \code{single\_open()}. On \code{read()}, the generic
+\code{seq\_read} invokes the show function, which streams formatted lines into a
+managed buffer; \code{single\_release} tears it down. The reported kernel version
+comes from compile-time macros in \code{<linux/version.h>}, so it reflects the
+headers the module was \emph{built} against.
+
+\subsection{Init and Exit Paths}
+
+The lifecycle of every LKM is bracketed by a function tagged \code{\_\_init}
+(reclaimed from memory after load) and one tagged \code{\_\_exit}, registered via
+\code{module\_init()} / \code{module\_exit()}. The core module's init path builds
+its \file{/proc} tree and unwinds carefully on failure:
+
+\begin{lstlisting}[language=C, caption={Init path with ordered cleanup (aulinux\_core.c, lines 56--79)}]
+static int __init aulinux_core_init(void)
+{
+    pr_info("AULinux: Initializing core module v%s\n", AULINUX_VERSION);
+
+    aulinux_proc_dir = proc_mkdir(AULINUX_PROC_NAME, NULL);
+    if (!aulinux_proc_dir) {
+        pr_err("AULinux: Failed to create /proc/%s\n", AULINUX_PROC_NAME);
+        return -ENOMEM;
+    }
+
+    aulinux_version_entry = proc_create("version", 0444,
+                                         aulinux_proc_dir,
+                                         &aulinux_version_ops);
+    if (!aulinux_version_entry) {
+        pr_err("AULinux: Failed to create version proc entry\n");
+        proc_remove(aulinux_proc_dir);   /* unwind on failure */
+        return -ENOMEM;
+    }
+
+    pr_info("AULinux: Core module initialized successfully\n");
+    return 0;
+}
+\end{lstlisting}
+
+The exit path mirrors this, removing the \file{version} entry and then the
+directory. Returning a negative errno from an \code{\_\_init} function aborts the
+load, so this ordered cleanup is essential — leaving a half-built \file{/proc}
+tree behind would leak kernel resources.
+
+\begin{infobox}[What you actually see]
+\begin{verbatim}
+$ cat /proc/aulinux/version
+AULinux Version: 1.0.0
+Kernel Version: 6.8.0
+\end{verbatim}
+The mode \code{0444} makes the file world-readable but unwritable: pure
+telemetry, no control surface.
+\end{infobox}
+
+\section{\code{aulinux\_procmon}: Watching Process Lifecycle}
+
+\file{aulinux\_procmon.c} is the most ambitious module. Its goal is to observe
+process creation and termination and expose both running counters and a recent-
+event history, so that a userland \code{ps}-like tool could read process activity
+straight from \file{/proc}.
+
+\subsection{Mechanism: Kprobes on Kernel Internals}
+
+The module uses \textbf{kprobes} — a kernel facility that lets you attach a
+handler to (almost) any kernel symbol by patching a breakpoint at its entry. Two
+probes are declared, each with a \code{pre\_handler} that fires \emph{before} the
+target function runs:
+
+\begin{lstlisting}[language=C, caption={Kprobe definitions targeting fork and exit (aulinux\_procmon.c, lines 104--112)}]
+static struct kprobe fork_kp = {
+    .symbol_name = "do_fork",
+    .pre_handler = fork_handler_pre,
+};
+
+static struct kprobe exit_kp = {
+    .symbol_name = "do_exit",
+    .pre_handler = exit_handler_pre,
+};
+\end{lstlisting}
+
+Each handler simply bumps an atomic counter and records an event against the
+\code{current} task — the task descriptor of whatever process is executing the
+probed code:
+
+\begin{lstlisting}[language=C, caption={Pre-handlers increment counters and log events (aulinux\_procmon.c, lines 86--101)}]
+static int fork_handler_pre(struct kprobe *p, struct pt_regs *regs)
+{
+    atomic_long_inc(&total_forks);
+    record_event(PROCMON_FORK, current);
+    return 0;
+}
+
+static int exit_handler_pre(struct kprobe *p, struct pt_regs *regs)
+{
+    atomic_long_inc(&total_exits);
+    record_event(PROCMON_EXIT, current);
+    return 0;
+}
+\end{lstlisting}
+
+\begin{warnbox}[\code{do\_fork} no longer exists on modern kernels]
+The fork probe targets the symbol \code{"do\_fork"}, which was renamed to
+\code{\_do\_fork} and later removed in favour of \code{kernel\_clone()} around
+Linux 5.10. On any recent kernel \code{register\_kprobe(\&fork\_kp)} will fail
+with \code{-EINVAL} (no such symbol). The module is written to \emph{tolerate}
+this: its init path logs a warning and continues, so fork counting will silently
+read zero rather than crashing the system. To actually count forks on a current
+kernel, the \code{.symbol\_name} must be updated to \code{"kernel\_clone"}.
+\end{warnbox}
+
+\subsection{The Event Ring Buffer}
+
+Events are stored in a fixed 64-slot circular buffer protected by an
+IRQ-safe spinlock — appropriate because probe handlers can fire in atomic
+context. Each record captures the event type, PID, parent PID, the 16-byte
+\code{comm} name, and a real-time timestamp.
+
+\begin{lstlisting}[language=C, caption={Recording an event under an IRQ-safe lock (aulinux\_procmon.c, lines 58--81)}]
+static void record_event(enum procmon_event_type type,
+                         struct task_struct *task)
+{
+    unsigned long flags;
+
+    if (!monitoring_enabled)
+        return;
+
+    spin_lock_irqsave(&event_lock, flags);
+
+    event_history[event_head].type = type;
+    event_history[event_head].pid  = task->pid;
+    event_history[event_head].ppid = task->real_parent ?
+                                     task->real_parent->pid : 0;
+    strncpy(event_history[event_head].comm, task->comm, TASK_COMM_LEN - 1);
+    event_history[event_head].comm[TASK_COMM_LEN - 1] = '\0';
+    event_history[event_head].timestamp = ktime_get_real();
+
+    event_head = (event_head + 1) % PROCMON_HISTORY_SIZE;
+    if (event_count < PROCMON_HISTORY_SIZE)
+        event_count++;
+
+    spin_unlock_irqrestore(&event_lock, flags);
+}
+\end{lstlisting}
+
+\subsection{Userland-Facing \file{/proc} Files}
+
+The module publishes two read-only files. \file{stats} prints the cumulative
+counters and the buffer fill level; \file{events} walks the ring buffer in
+chronological order and prints a formatted table:
+
+\begin{lstlisting}[language=C, caption={The events table walker (aulinux\_procmon.c, lines 132--158)}]
+static int procmon_events_show(struct seq_file *m, void *v)
+{
+    unsigned long flags;
+    int i, idx;
+    static const char *type_names[] = { "FORK", "EXEC", "EXIT" };
+
+    seq_printf(m, "Recent Process Events\n");
+    seq_printf(m, "%-6s %-6s %-6s %-16s %s\n",
+               "TYPE", "PID", "PPID", "COMM", "TIMESTAMP");
+
+    spin_lock_irqsave(&event_lock, flags);
+    for (i = 0; i < event_count; i++) {
+        idx = (event_head - event_count + i + PROCMON_HISTORY_SIZE)
+              % PROCMON_HISTORY_SIZE;
+        seq_printf(m, "%-6s %-6d %-6d %-16s %lld\n",
+                   type_names[event_history[idx].type],
+                   event_history[idx].pid,
+                   event_history[idx].ppid,
+                   event_history[idx].comm,
+                   ktime_to_ns(event_history[idx].timestamp));
+    }
+    spin_unlock_irqrestore(&event_lock, flags);
+    return 0;
+}
+\end{lstlisting}
+
+A userland \code{ps} could poll \file{/proc/aulinux/procmon/events} and join the
+recent fork/exit stream against its own \file{/proc/[pid]} scan to flag
+short-lived processes that a snapshot would miss.
+
+\begin{notebox}[EXEC is declared but never recorded]
+The \code{enum procmon\_event\_type} defines \code{PROCMON\_EXEC} and the table
+header reserves an ``EXEC'' label and an \code{atomic\_long\_t total\_execs}
+counter — but \emph{no kprobe targets exec}. There is no probe on
+\code{do\_execve} / \code{bprm\_execve}, so \code{total\_execs} is permanently
+zero and no EXEC rows ever appear. Exec monitoring is a stub. Likewise,
+\code{monitoring\_enabled} is a hardcoded \code{static int = 1} with no
+\file{/proc} or sysctl write handler, so the ``enable/disable'' capability
+advertised in \file{stats} cannot actually be toggled at runtime yet.
+\end{notebox}
+
+\begin{warnbox}[A real bug: the procmon \file{/proc} directory]
+\code{aulinux\_procmon\_init} calls
+\code{proc\_mkdir("aulinux/procmon", NULL)} (line 209). This depends on
+\file{/proc/aulinux} already existing — i.e. on \code{aulinux\_core} being
+loaded \emph{first}. If procmon is loaded alone, the nested \code{proc\_mkdir}
+fails and \code{procmon\_dir} is \code{NULL}; the code guards on this
+(\code{if (procmon\_dir)}), so the \file{stats}/\file{events} files are simply
+never created and the module loads ``successfully'' but exposes nothing. The
+\file{Makefile} \code{load} target sidesteps this by ordering the loads
+(\code{sysctl}, then \code{core}, then \code{procmon}), but there is no
+\code{MODULE\_SOFTDEP} or symbol dependency enforcing it.
+\end{warnbox}
+
+\section{\code{aulinux\_sysctl}: Runtime Tunables}
+
+\file{aulinux\_sysctl.c} registers the \file{/proc/sys/aulinux/} tree and is the
+one module that includes the shared \file{aulinux.h}. It owns the three
+configuration variables and exports the two accessor functions the header
+promised.
+
+\subsection{The \code{ctl\_table}}
+
+Sysctl variables are described declaratively in a \code{struct ctl\_table}
+array. Each entry binds a procfs name to a backing variable, a size, a mode, and
+a handler that marshals between the text in \file{/proc/sys} and the in-kernel
+integer. Two of the three entries use \code{proc\_dointvec\_minmax} with bound
+variables to clamp input.
+
+\begin{lstlisting}[language=C, caption={The sysctl table with min/max clamping (aulinux\_sysctl.c, lines 32--58)}]
+static struct ctl_table aulinux_sysctl_table[] = {
+    {
+        .procname     = "debug_level",
+        .data         = &aulinux_debug_level,
+        .maxlen       = sizeof(int),
+        .mode         = 0644,
+        .proc_handler = proc_dointvec_minmax,
+        .extra1       = &debug_level_min,   /* 0 */
+        .extra2       = &debug_level_max,   /* 2 */
+    },
+    {
+        .procname     = "feature_flags",
+        .data         = &aulinux_feature_flags,
+        .maxlen       = sizeof(int),
+        .mode         = 0644,
+        .proc_handler = proc_dointvec,      /* unbounded bitfield */
+    },
+    {
+        .procname     = "max_processes",
+        .data         = &aulinux_max_processes,
+        .maxlen       = sizeof(int),
+        .mode         = 0644,
+        .proc_handler = proc_dointvec_minmax,
+        .extra1       = &max_proc_min,      /* 128   */
+        .extra2       = &max_proc_max,      /* 65536 */
+    },
+};
+\end{lstlisting}
+
+These files are mode \code{0644} — readable by all, writable by root. Writing
+\code{echo 3 > /proc/sys/aulinux/debug\_level} is rejected by the
+\code{minmax} handler (max is 2); \code{echo 2} succeeds and immediately changes
+what \code{aulinux\_get\_debug\_level()} returns.
+
+\subsection{Registration and the Exported Contract}
+
+Registration uses the modern single-call \code{register\_sysctl()} API (the
+older \code{register\_sysctl\_table} path is gone on current kernels). The module
+then exports its two accessors so that other modules — and the
+\code{aulinux\_pr\_debug} macro in the shared header — can query configuration
+at runtime.
+
+\begin{lstlisting}[language=C, caption={Exported symbols and sysctl registration (aulinux\_sysctl.c, lines 65--91)}]
+int aulinux_get_debug_level(void)
+{
+    return aulinux_debug_level;
+}
+EXPORT_SYMBOL(aulinux_get_debug_level);
+
+int aulinux_feature_enabled(int flag)
+{
+    return (aulinux_feature_flags & flag) != 0;
+}
+EXPORT_SYMBOL(aulinux_feature_enabled);
+
+static int __init aulinux_sysctl_init(void)
+{
+    aulinux_sysctl_header = register_sysctl("aulinux", aulinux_sysctl_table);
+    if (!aulinux_sysctl_header) {
+        pr_err("AULinux: Failed to register sysctl table\n");
+        return -ENOMEM;
+    }
+    return 0;
+}
+\end{lstlisting}
+
+\begin{notebox}[The exports are real, the consumers are mostly latent]
+\code{EXPORT\_SYMBOL} genuinely publishes both functions into the kernel symbol
+table, so this module \emph{must} be loaded before any module that references
+them (hence its first position in the \file{Makefile} \code{load} order).
+However, today only \file{aulinux.h}'s \code{aulinux\_pr\_debug} macro would call
+\code{aulinux\_get\_debug\_level()}, and that macro is not yet used in
+\file{aulinux\_core.c} or \file{aulinux\_procmon.c}. \code{aulinux\_feature\_enabled()}
+and the \code{max\_processes} tunable have no in-kernel readers at all — they are
+plumbed and ready, but nothing consumes them yet.
+\end{notebox}
+
+\section{The Three Modules Side by Side}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Module} & \textbf{/proc or /sys entry} & \textbf{Purpose} & \textbf{Status} \\
+\midrule
+\code{aulinux\_core}    & \file{/proc/aulinux/version}      & Version telemetry            & Complete \\
+\code{aulinux\_procmon} & \file{/proc/aulinux/procmon/stats}  & Lifecycle counters         & Partial (exec stubbed) \\
+                        & \file{/proc/aulinux/procmon/events} & Event ring buffer          & Fork probe broken on 5.10+ \\
+\code{aulinux\_sysctl}  & \file{/proc/sys/aulinux/*}        & Runtime tunables + exports   & Complete; consumers latent \\
+\bottomrule
+\end{tabular}
+\caption{Real entry points and honest status of the AULinux kernel modules.}
+\end{table}
+
+\section{Building and Loading}
+
+The modules are built with the standard kbuild out-of-tree pattern. Both
+\file{src/Kbuild} and the top-level \file{Makefile} list the three objects as
+\code{obj-m} targets, which tells kbuild to compile them as loadable modules
+(\code{.ko}) rather than linking them into the kernel.
+
+\begin{lstlisting}[language=C, caption={Module targets in src/Kbuild}]
+obj-m += aulinux_core.o
+obj-m += aulinux_sysctl.o
+obj-m += aulinux_procmon.o
+
+ccflags-y := -I$(src)
+ccflags-y += -DAULINUX_MODULE
+\end{lstlisting}
+
+The \file{Makefile} drives the kernel's own build system by recursion. The key
+invocation hands control to the kernel tree at \code{KDIR} and points it back at
+the AULinux sources via \code{M=}:
+
+\begin{lstlisting}[language=bash, caption={The out-of-tree build recursion (Makefile)}]
+KDIR ?= /lib/modules/$(shell uname -r)/build
+SRC_DIR := $(shell pwd)/src
+
+modules:
+	$(MAKE) -C $(KDIR) M=$(SRC_DIR) modules
+	@cp $(SRC_DIR)/*.ko $(BUILD_DIR)/    # -> ../build/kernel/
+\end{lstlisting}
+
+This is why the modules need the matching \textbf{kernel headers / build
+directory} installed: kbuild compiles each \code{.c} against the exact
+configuration of the target kernel and stamps the result with a vermagic string.
+A \code{.ko} built for one kernel will refuse to load on a mismatched one.
+
+\subsection{Load Order Matters}
+
+The \file{Makefile} provides \code{load} and \code{unload} convenience targets
+that encode the dependency ordering discovered above:
+
+\begin{lstlisting}[language=bash, caption={Ordered insmod / rmmod (Makefile)}]
+load:
+	insmod $(BUILD_DIR)/aulinux_sysctl.ko    # exports symbols first
+	insmod $(BUILD_DIR)/aulinux_core.ko      # creates /proc/aulinux
+	insmod $(BUILD_DIR)/aulinux_procmon.ko   # nests under it
+
+unload:
+	-rmmod aulinux_procmon
+	-rmmod aulinux_core
+	-rmmod aulinux_sysctl
+\end{lstlisting}
+
+\begin{warnbox}[Why the order is not optional]
+\code{aulinux\_sysctl} must load first because it \code{EXPORT\_SYMBOL}s the
+accessors other modules link against. \code{aulinux\_core} must precede
+\code{aulinux\_procmon} because the latter nests its directory under
+\file{/proc/aulinux}. Because nothing in the code declares these dependencies
+(no \code{MODULE\_SOFTDEP}, no referenced exported symbol from procmon), loading
+out of order fails silently rather than loudly. In a robust build this ordering
+should be promoted into \code{depmod} metadata or explicit soft dependencies.
+\end{warnbox}
+
+\section{Design Rationale and Limitations}
+
+The AULinux kernel layer is a clean, readable demonstration of the three pillars
+of kernel-userspace interaction — \code{procfs} via \code{seq\_file},
+\code{sysctl} via \code{ctl\_table}, and dynamic instrumentation via kprobes —
+but it is honestly an early-stage scaffold rather than a finished subsystem.
+
+\begin{itemize}
+  \item \textbf{\code{aulinux\_core}} is complete and correct: it does exactly
+        one thing (publish version telemetry) and does it idiomatically with
+        proper failure unwinding.
+  \item \textbf{\code{aulinux\_sysctl}} is complete as a control surface — the
+        tunables clamp, persist, and are exported — but its readers are still
+        latent, so today it configures behaviour nothing yet acts on.
+  \item \textbf{\code{aulinux\_procmon}} is the furthest from done. Its fork
+        probe targets a symbol (\code{do\_fork}) removed from modern kernels,
+        exec monitoring is declared but unimplemented, and
+        \code{monitoring\_enabled} cannot be toggled. The ring-buffer plumbing
+        and the \file{/proc} presentation, however, are real and sound.
+\end{itemize}
+
+\begin{infobox}[The deeper lesson]
+Kernel code runs with no memory protection and no safety net: a stray pointer in
+a probe handler panics the whole machine. AULinux's choice to keep these modules
+small, single-purpose, and loadable — rather than patching the monolith — is
+precisely the discipline that keeps that danger contained. The honest gaps
+catalogued above are not failures of the design; they are the to-do list a
+serious kernel engineer would tackle next, with the architecture already laid
+out to receive them.
+\end{infobox}

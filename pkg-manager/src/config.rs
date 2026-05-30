@@ -55,16 +55,57 @@ impl Config {
     const CACHE_DIR: &'static str = "/var/cache/aupkg";
     const DB_DIR: &'static str = "/var/lib/aupkg";
 
-    pub fn load() -> Self {
-        let config_path = Path::new(Self::CONFIG_DIR).join(Self::CONFIG_FILE);
-        if config_path.exists() {
-            if let Ok(content) = fs::read_to_string(config_path) {
-                if let Ok(config) = serde_json::from_str(&content) {
-                    return config;
+    pub fn load_dynamic_mirrors(&mut self) {
+        // 1. Try to load from environment variable
+        if let Ok(env_mirrors) = std::env::var("AUPKG_MIRRORS") {
+            // Format: name=url,name2=url2
+            let mut env_repos = Vec::new();
+            for part in env_mirrors.split(',') {
+                let kv: Vec<&str> = part.split('=').collect();
+                if kv.len() == 2 {
+                    env_repos.push(RepoEntry {
+                        name: kv[0].trim().to_string(),
+                        url: kv[1].trim().to_string(),
+                        enabled: true,
+                    });
+                }
+            }
+            if !env_repos.is_empty() {
+                self.repositories = env_repos;
+                return;
+            }
+        }
+
+        // 2. Try to load from a mirror list file: /etc/aulinux/aupkg/mirrors.json
+        let mirrors_path = Path::new(Self::CONFIG_DIR).join("mirrors.json");
+        if mirrors_path.exists() {
+            if let Ok(content) = fs::read_to_string(mirrors_path) {
+                if let Ok(custom_repos) = serde_json::from_str::<Vec<RepoEntry>>(&content) {
+                    if !custom_repos.is_empty() {
+                        self.repositories = custom_repos;
+                    }
                 }
             }
         }
-        Self::default()
+    }
+
+    pub fn load() -> Self {
+        let config_path = Path::new(Self::CONFIG_DIR).join(Self::CONFIG_FILE);
+        let mut config = if config_path.exists() {
+            if let Ok(content) = fs::read_to_string(config_path) {
+                if let Ok(cfg) = serde_json::from_str(&content) {
+                    cfg
+                } else {
+                    Self::default()
+                }
+            } else {
+                Self::default()
+            }
+        } else {
+            Self::default()
+        };
+        config.load_dynamic_mirrors();
+        config
     }
 
     pub fn save(&self) -> std::io::Result<()> {

@@ -1,0 +1,66 @@
+name: Build AULinux Live ISO
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-iso:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+        cache: true
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+        targets: x86_64-unknown-linux-gnu
+
+    - name: Install System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          gcc \
+          make \
+          cpio \
+          gzip \
+          tar \
+          curl \
+          grub-common \
+          grub-pc-bin \
+          xorriso \
+          mtools \
+          libisoburn-dev \
+          linux-headers-$(uname -r)
+
+    - name: Make Scripts Executable
+      run: |
+        chmod +x scripts/build.sh
+        chmod +x scripts/make_rootfs.sh
+        chmod +x scripts/build_iso.sh
+        chmod +x scripts/install_os.sh
+        chmod +x scripts/populate_graphics_repo.sh
+        chmod +x scripts/start_desktop.sh
+
+    - name: Build AULinux Bootable ISO
+      run: |
+        ./scripts/build_iso.sh
+
+    - name: Upload Bootable ISO Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: aulinux-live-iso
+        path: build/aulinux.iso
+        if-no-files-found: error
+        retention-days: 7

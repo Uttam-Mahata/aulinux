@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  ALPINE_VERSION: "3.19"
-  ALPINE_RELEASE: "3.19.0"
+  ALPINE_VERSION: "3.20"
+  # ALPINE_RELEASE is resolved dynamically per-arch from latest-releases.yaml
 
 jobs:
   build:
@@ -130,8 +130,16 @@ jobs:
       # ── Assemble rootfs ─────────────────────────────────────────────────────
       - name: Download Alpine minirootfs [${{ matrix.arch }}]
         run: |
-          ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/alpine-minirootfs-${{ env.ALPINE_RELEASE }}-${{ matrix.alpine_arch }}.tar.gz"
-          curl -fSL "$ROOTFS_URL" -o build/alpine-minirootfs.tar.gz
+          # Resolve the exact patch release from Alpine's authoritative YAML
+          RELEASES_YAML="https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/latest-releases.yaml"
+          ALPINE_RELEASE=$(curl -fSL "$RELEASES_YAML" \
+            | grep -A5 'flavor: alpine-minirootfs' \
+            | grep 'version:' | head -1 \
+            | awk '{print $2}')
+          echo "Resolved Alpine ${{ env.ALPINE_VERSION }} / ${{ matrix.alpine_arch }} minirootfs: $ALPINE_RELEASE"
+          curl -fSL \
+            "https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/alpine-minirootfs-${ALPINE_RELEASE}-${{ matrix.alpine_arch }}.tar.gz" \
+            -o build/alpine-minirootfs.tar.gz
           mkdir -p rootfs
           sudo tar -xzf build/alpine-minirootfs.tar.gz -C rootfs
 
@@ -199,10 +207,7 @@ jobs:
             initrd /boot/initramfs.img
           }
           GRUBEOF
-          grub-mkrescue \
-            --modules="linux normal iso9660 biosdisk search" \
-            -o build/aulinux-x86_64.iso \
-            build/iso_tmp
+          grub-mkrescue -o build/aulinux-x86_64.iso build/iso_tmp
 
       - name: Build EFI disk image [aarch64]
         if: matrix.arch == 'aarch64'

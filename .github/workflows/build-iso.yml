@@ -3,6 +3,7 @@ name: Build AULinux ISO
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   pull_request:
     branches: [main, master]
   workflow_dispatch:
@@ -15,6 +16,8 @@ jobs:
   build:
     name: Build [${{ matrix.arch }}]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -259,7 +262,7 @@ jobs:
           mcopy -i build/aulinux-armv7.img build/vmlinuz       ::/boot/vmlinuz
           mcopy -i build/aulinux-armv7.img build/initramfs.img ::/boot/initramfs.img
 
-      # ── Upload artifact ──────────────────────────────────────────────────────
+      # ── Upload artifact (zip, every run) ────────────────────────────────────
       - name: Upload artifact [${{ matrix.arch }}]
         uses: actions/upload-artifact@v4
         with:
@@ -267,3 +270,11 @@ jobs:
           path: build/aulinux-${{ matrix.arch }}.${{ matrix.artifact_ext }}
           if-no-files-found: warn
           retention-days: 7
+
+      # ── Attach raw file to GitHub Release (tag pushes only) ──────────────────
+      - name: Upload to GitHub Release [${{ matrix.arch }}]
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/aulinux-${{ matrix.arch }}.${{ matrix.artifact_ext }}
+          generate_release_notes: true

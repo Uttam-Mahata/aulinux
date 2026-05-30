@@ -135,6 +135,7 @@ if [ -f "$REPO_DB" ]; then
     python3 - <<EOF
 import json
 import os
+import platform
 
 repo_path = "$REPO_DB"
 try:
@@ -163,7 +164,7 @@ for name, info in packages_to_update.items():
             "version": info["version"],
             "description": info["description"],
             "maintainer": "AULinux Core Team",
-            "architecture": "x86_64",
+            "architecture": platform.machine(),
             "installed_size": 2048000,
             "dependencies": [],
             "optional_deps": [],

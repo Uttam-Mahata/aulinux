@@ -107,7 +107,7 @@ build_pkgmanager() {
     cd "$PROJECT_ROOT/pkg-manager"
     local target="${RUST_TARGET:-}"
     if [ -n "$target" ]; then
-        RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target "$target"
+        cargo build --release --target "$target"
         mkdir -p "$BUILD_DIR/pkg-manager"
         cp "target/$target/release/aupkg" "$BUILD_DIR/pkg-manager/"
     else

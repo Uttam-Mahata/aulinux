@@ -123,7 +123,7 @@ if [ "$1" == "--gui" ]; then
         -initrd "$INITRAMFS_FILE" \
         -append "init=/sbin/init quiet" \
         -net nic,model=virtio -net user \
-        -m 512M
+        -m 2G
 else
     info "Launching QEMU in non-graphical mode..."
     info "--------------------------------------------------------"
@@ -136,5 +136,5 @@ else
         -append "init=/sbin/init console=ttyS0 quiet" \
         -net nic,model=virtio -net user \
         -nographic \
-        -m 512M
+        -m 2G
 fi

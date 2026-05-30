@@ -186,6 +186,7 @@ if [ -f "$REPO_DB" ]; then
     echo "  + Updating package registry repo.db..."
     python3 - <<EOF
 import json
+import platform
 repo_path = "$REPO_DB"
 try:
     with open(repo_path, 'r') as f:
@@ -198,7 +199,7 @@ db["firefox"] = {
     "version": "115.0.3esr",
     "description": "Real Firefox ESR web browser",
     "maintainer": "AULinux Core Team",
-    "architecture": "x86_64",
+    "architecture": platform.machine(),
     "installed_size": 75000000,
     "dependencies": [],
     "optional_deps": [],
@@ -217,7 +218,7 @@ db["pipewire"] = {
     "version": "1.0.0",
     "description": "Real PipeWire low-latency multimedia framework",
     "maintainer": "AULinux Core Team",
-    "architecture": "x86_64",
+    "architecture": platform.machine(),
     "installed_size": 15000000,
     "dependencies": [],
     "optional_deps": [],

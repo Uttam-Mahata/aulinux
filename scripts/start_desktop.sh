@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # scripts/start_desktop.sh
 # Startup helper script to launch a graphical desktop environment (Openbox) in AULinux.
 

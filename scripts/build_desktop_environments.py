@@ -11,6 +11,7 @@ import sys
 import json
 import shutil
 import subprocess
+import platform
 
 # Define the file paths relative to this script
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -207,7 +208,7 @@ def build_package(pkg_info):
         "version": version,
         "description": pkg_info["description"],
         "maintainer": "AuLinux Desktop Team",
-        "architecture": "x86_64",
+        "architecture": platform.machine(),
         "installed_size": total_size,
         "dependencies": pkg_info["dependencies"],
         "optional_deps": [],

@@ -61,9 +61,5 @@ rootfs/
 *.deb
 *.rpm
 
-# LaTeX build artifacts
-book/*.aux
-book/*.log
-book/*.out
-book/*.toc
-book/*.pdf
+# LaTeX (sources and build artifacts)
+book/

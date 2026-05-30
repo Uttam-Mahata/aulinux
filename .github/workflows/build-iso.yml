@@ -178,9 +178,27 @@ jobs:
 
       - name: Download kernel [${{ matrix.arch }}]
         run: |
-          curl -fSL \
-            "https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/netboot/vmlinuz-virt" \
-            -o build/vmlinuz
+          NETBOOT_URL="https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/netboot/vmlinuz-virt"
+          if curl -fSL "$NETBOOT_URL" -o build/vmlinuz 2>/dev/null; then
+            echo "Downloaded netboot kernel for ${{ matrix.alpine_arch }}"
+          else
+            # armv7 has no netboot; extract the kernel from the Alpine virt ISO
+            echo "${{ matrix.alpine_arch }} has no netboot — extracting kernel from Alpine virt ISO"
+            RELEASES_YAML="https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/latest-releases.yaml"
+            VIRT_VER=$(curl -fSL "$RELEASES_YAML" \
+              | grep -o 'alpine-virt-[0-9][0-9.]*-' \
+              | head -1 | sed 's/alpine-virt-//;s/-$//')
+            echo "Alpine virt ISO version: $VIRT_VER"
+            curl -fSL \
+              "https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/alpine-virt-${VIRT_VER}-${{ matrix.alpine_arch }}.iso" \
+              -o /tmp/alpine-virt.iso
+            mkdir -p /tmp/iso_mnt
+            sudo mount -o ro,loop /tmp/alpine-virt.iso /tmp/iso_mnt
+            cp /tmp/iso_mnt/boot/vmlinuz-virt build/vmlinuz \
+              || cp /tmp/iso_mnt/boot/vmlinuz build/vmlinuz
+            sudo umount /tmp/iso_mnt
+            rm -f /tmp/alpine-virt.iso
+          fi
 
       - name: Build initramfs [${{ matrix.arch }}]
         run: |

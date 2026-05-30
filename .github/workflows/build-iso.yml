@@ -38,8 +38,9 @@ jobs:
             cc: aarch64-linux-gnu-gcc
             rust_linker: aarch64-linux-gnu-gcc
             rust_target: aarch64-unknown-linux-gnu
-            cross_pkgs: "gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu"
-            grub_pkgs: grub-efi-arm64-bin
+            # crossbuild-essential-arm64 includes gcc + binutils + libc6-dev-arm64-cross
+            cross_pkgs: crossbuild-essential-arm64
+            grub_pkgs: ""
             alpine_arch: aarch64
             artifact_ext: img
 
@@ -50,7 +51,8 @@ jobs:
             cc: arm-linux-gnueabihf-gcc
             rust_linker: arm-linux-gnueabihf-gcc
             rust_target: armv7-unknown-linux-gnueabihf
-            cross_pkgs: "gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf"
+            # crossbuild-essential-armhf includes gcc + binutils + libc6-dev-armhf-cross
+            cross_pkgs: crossbuild-essential-armhf
             grub_pkgs: ""
             alpine_arch: armv7
             artifact_ext: img
@@ -62,7 +64,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: '1.22'
           cache: true
 
       - name: Set up Rust
@@ -94,6 +96,7 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.go_arch }}
           GOARM: ${{ matrix.go_arm }}
+          GOTOOLCHAIN: local
         run: |
           mkdir -p build/utils
           go build \

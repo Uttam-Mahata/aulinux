@@ -11,6 +11,10 @@ if [ -z "$ROOTFS_DIR" ]; then
     exit 1
 fi
 
+_GNU_TRIPLE="$(gcc -dumpmachine 2>/dev/null \
+    || dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null \
+    || echo "x86_64-linux-gnu")"
+
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CACHE_DIR="$PROJECT_ROOT/build/cache"
 mkdir -p "$CACHE_DIR"
@@ -75,7 +79,11 @@ copy_binary() {
 
 # ── Part A: Firefox ESR (Official Tarball) ──
 FIREFOX_CACHE="$CACHE_DIR/firefox-esr.tar.bz2"
-FIREFOX_URL="https://download.mozilla.org/?product=firefox-esr-latest&os=linux64&lang=en-US"
+case "$(uname -m)" in
+    aarch64) _ff_arch="linux-aarch64" ;;
+    *)       _ff_arch="linux-x86_64"  ;;
+esac
+FIREFOX_URL="https://archive.mozilla.org/pub/firefox/releases/128.0esr/${_ff_arch}/en-US/firefox-128.0esr.tar.bz2"
 
 if [ ! -f "$FIREFOX_CACHE" ] || [ "$(stat -c%s "$FIREFOX_CACHE")" -lt 50000000 ]; then
     echo "  + Downloading Firefox ESR..."
@@ -142,18 +150,18 @@ for pw_bin in "${PIPEWIRE_BINARIES[@]}"; do
 done
 
 # Copy PipeWire modules & config
-if [ -d "/usr/lib/x86_64-linux-gnu/pipewire-0.3" ]; then
-    mkdir -p "$ROOTFS_DIR/usr/lib/x86_64-linux-gnu"
-    cp -rP /usr/lib/x86_64-linux-gnu/pipewire-0.3 "$ROOTFS_DIR/usr/lib/x86_64-linux-gnu/"
-    find "$ROOTFS_DIR/usr/lib/x86_64-linux-gnu/pipewire-0.3" -name "*.so" | while read -r lib; do
+if [ -d "/usr/lib/${_GNU_TRIPLE}/pipewire-0.3" ]; then
+    mkdir -p "$ROOTFS_DIR/usr/lib/${_GNU_TRIPLE}"
+    cp -rP /usr/lib/${_GNU_TRIPLE}/pipewire-0.3 "$ROOTFS_DIR/usr/lib/${_GNU_TRIPLE}/"
+    find "$ROOTFS_DIR/usr/lib/${_GNU_TRIPLE}/pipewire-0.3" -name "*.so" | while read -r lib; do
         resolve_deps "$lib" "$ROOTFS_DIR"
     done
 fi
 
-if [ -d "/usr/lib/x86_64-linux-gnu/spa-0.2" ]; then
-    mkdir -p "$ROOTFS_DIR/usr/lib/x86_64-linux-gnu"
-    cp -rP /usr/lib/x86_64-linux-gnu/spa-0.2 "$ROOTFS_DIR/usr/lib/x86_64-linux-gnu/"
-    find "$ROOTFS_DIR/usr/lib/x86_64-linux-gnu/spa-0.2" -name "*.so" | while read -r lib; do
+if [ -d "/usr/lib/${_GNU_TRIPLE}/spa-0.2" ]; then
+    mkdir -p "$ROOTFS_DIR/usr/lib/${_GNU_TRIPLE}"
+    cp -rP /usr/lib/${_GNU_TRIPLE}/spa-0.2 "$ROOTFS_DIR/usr/lib/${_GNU_TRIPLE}/"
+    find "$ROOTFS_DIR/usr/lib/${_GNU_TRIPLE}/spa-0.2" -name "*.so" | while read -r lib; do
         resolve_deps "$lib" "$ROOTFS_DIR"
     done
 fi

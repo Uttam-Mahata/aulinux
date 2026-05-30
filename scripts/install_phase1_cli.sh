@@ -71,12 +71,18 @@ copy_binary() {
 }
 
 # 1. Ensure ld-linux exists
+_gnu_triple="$(gcc -dumpmachine 2>/dev/null || dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")"
+case "$(uname -m)" in
+    x86_64)  _ld_path="/lib64/ld-linux-x86-64.so.2"; _ld_name="ld-linux-x86-64.so.2" ;;
+    aarch64) _ld_path="/lib/ld-linux-aarch64.so.1";  _ld_name="ld-linux-aarch64.so.1" ;;
+    armv7l)  _ld_path="/lib/ld-linux-armhf.so.3";    _ld_name="ld-linux-armhf.so.3"   ;;
+    *)       _ld_path="$(find /lib64 /lib -maxdepth 1 -name 'ld-linux*.so*' 2>/dev/null | head -1)"
+             _ld_name="$(basename "$_ld_path")" ;;
+esac
 mkdir -p "$ROOTFS_DIR/lib64"
-if [ -f "/lib64/ld-linux-x86-64.so.2" ]; then
-    cp -L /lib64/ld-linux-x86-64.so.2 "$ROOTFS_DIR/lib64/"
-fi
-mkdir -p "$ROOTFS_DIR/lib/x86_64-linux-gnu"
-ln -sf /lib64/ld-linux-x86-64.so.2 "$ROOTFS_DIR/lib/ld-linux-x86-64.so.2" 2>/dev/null || true
+[ -f "$_ld_path" ] && cp -L "$_ld_path" "$ROOTFS_DIR/lib64/" || true
+mkdir -p "$ROOTFS_DIR/lib/$_gnu_triple"
+ln -sf "$_ld_path" "$ROOTFS_DIR/lib/$_ld_name" 2>/dev/null || true
 
 # 2. Copy binaries to /usr/bin
 CLI_BINARIES=(git curl wget vim nano rsync less find grep sed awk diff patch which)

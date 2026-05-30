@@ -105,10 +105,16 @@ build_utils() {
 build_pkgmanager() {
     info "Building package manager (aupkg)..."
     cd "$PROJECT_ROOT/pkg-manager"
-    local target="${RUST_TARGET:-x86_64-unknown-linux-musl}"
-    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target "$target"
-    mkdir -p "$BUILD_DIR/pkg-manager"
-    cp "target/$target/release/aupkg" "$BUILD_DIR/pkg-manager/"
+    local target="${RUST_TARGET:-}"
+    if [ -n "$target" ]; then
+        RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target "$target"
+        mkdir -p "$BUILD_DIR/pkg-manager"
+        cp "target/$target/release/aupkg" "$BUILD_DIR/pkg-manager/"
+    else
+        cargo build --release
+        mkdir -p "$BUILD_DIR/pkg-manager"
+        cp target/release/aupkg "$BUILD_DIR/pkg-manager/"
+    fi
     success "Package manager built"
 }
 

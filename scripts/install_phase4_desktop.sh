@@ -101,7 +101,16 @@ else
 fi
 
 # 3. Extract and Deploy Xterm from Debian/Ubuntu package
-XTERM_DEB="$(find "$PROJECT_ROOT" -name "xterm_*.deb" | head -n 1)"
+CACHE_DIR="$PROJECT_ROOT/build/cache"
+mkdir -p "$CACHE_DIR"
+XTERM_DEB="$(find "$CACHE_DIR" -name "xterm_*.deb" | head -n 1)"
+
+if [ -z "$XTERM_DEB" ] || [ ! -f "$XTERM_DEB" ]; then
+    echo "  + Downloading xterm deb package..."
+    (cd "$CACHE_DIR" && apt-get download xterm 2>/dev/null || true)
+    XTERM_DEB="$(find "$CACHE_DIR" -name "xterm_*.deb" | head -n 1)"
+fi
+
 if [ -n "$XTERM_DEB" ] && [ -f "$XTERM_DEB" ]; then
     echo "  + Extracting downloaded xterm deb package ($XTERM_DEB)..."
     EXTRACT_DIR="$PROJECT_ROOT/build/xterm-extracted"
@@ -177,7 +186,7 @@ export DISPLAY=:0
 export HOME=/root
 export USER=root
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-export LD_LIBRARY_PATH=/lib:/usr/lib:/usr/lib/x86_64-linux-gnu
+export LD_LIBRARY_PATH=/lib:/usr/lib:/usr/lib/$(gcc -dumpmachine 2>/dev/null || echo x86_64-linux-gnu)
 
 mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix

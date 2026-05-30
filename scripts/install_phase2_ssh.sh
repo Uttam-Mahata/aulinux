@@ -147,10 +147,11 @@ session    required     pam_permit.so
 EOF
 
 # 6. Add PAM permit library if PAM is resolved
-pam_permit_path="/lib/x86_64-linux-gnu/security/pam_permit.so"
+_gnu_triple="$(gcc -dumpmachine 2>/dev/null || dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")"
+pam_permit_path="/lib/$_gnu_triple/security/pam_permit.so"
 if [ -f "$pam_permit_path" ]; then
-    mkdir -p "$ROOTFS_DIR/lib/x86_64-linux-gnu/security"
-    cp -L "$pam_permit_path" "$ROOTFS_DIR/lib/x86_64-linux-gnu/security/"
+    mkdir -p "$ROOTFS_DIR/lib/$_gnu_triple/security"
+    cp -L "$pam_permit_path" "$ROOTFS_DIR/lib/$_gnu_triple/security/"
     resolve_deps "$pam_permit_path" "$ROOTFS_DIR"
 fi
 

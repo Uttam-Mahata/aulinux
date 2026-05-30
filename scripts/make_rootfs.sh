@@ -1,9 +1,21 @@
 #!/bin/bash
 set -e
 
-PROJECT_ROOT=$(pwd)
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$PROJECT_ROOT/build"
 ROOTFS_DIR="$PROJECT_ROOT/rootfs"
+
+# Detect host GNU triplet and dynamic linker path
+GNU_TRIPLE="$(gcc -dumpmachine 2>/dev/null \
+    || dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null \
+    || echo "x86_64-linux-gnu")"
+case "$(uname -m)" in
+    x86_64)  LD_LINUX_PATH="/lib64/ld-linux-x86-64.so.2"; LD_LINUX_NAME="ld-linux-x86-64.so.2" ;;
+    aarch64) LD_LINUX_PATH="/lib/ld-linux-aarch64.so.1";  LD_LINUX_NAME="ld-linux-aarch64.so.1" ;;
+    armv7l)  LD_LINUX_PATH="/lib/ld-linux-armhf.so.3";    LD_LINUX_NAME="ld-linux-armhf.so.3"   ;;
+    *)       LD_LINUX_PATH="$(find /lib64 /lib -maxdepth 1 -name 'ld-linux*.so*' 2>/dev/null | head -1)"
+             LD_LINUX_NAME="$(basename "$LD_LINUX_PATH")" ;;
+esac
 
 echo "Creating rootfs in $ROOTFS_DIR..."
 
@@ -15,23 +27,23 @@ chmod 1777 "$ROOTFS_DIR/tmp"
 
 # Copy essential shared libraries and dynamic loader
 echo "Copying shared libraries..."
-cp -L /lib64/ld-linux-x86-64.so.2 "$ROOTFS_DIR/lib64/"
-cp -L /lib/x86_64-linux-gnu/libc.so.6 "$ROOTFS_DIR/lib/"
-cp -L /lib/x86_64-linux-gnu/libm.so.6 "$ROOTFS_DIR/lib/"
-cp -L /lib/x86_64-linux-gnu/libresolv.so.2 "$ROOTFS_DIR/lib/"
-cp -L /lib/x86_64-linux-gnu/librt.so.1 "$ROOTFS_DIR/lib/"
-cp -L /lib/x86_64-linux-gnu/libdl.so.2 "$ROOTFS_DIR/lib/"
-cp -L /lib/x86_64-linux-gnu/libpthread.so.0 "$ROOTFS_DIR/lib/"
+[ -f "$LD_LINUX_PATH" ] && cp -L "$LD_LINUX_PATH" "$ROOTFS_DIR/lib64/" || true
+cp -L /lib/$GNU_TRIPLE/libc.so.6 "$ROOTFS_DIR/lib/"
+cp -L /lib/$GNU_TRIPLE/libm.so.6 "$ROOTFS_DIR/lib/"
+cp -L /lib/$GNU_TRIPLE/libresolv.so.2 "$ROOTFS_DIR/lib/"
+cp -L /lib/$GNU_TRIPLE/librt.so.1 "$ROOTFS_DIR/lib/"
+cp -L /lib/$GNU_TRIPLE/libdl.so.2 "$ROOTFS_DIR/lib/"
+cp -L /lib/$GNU_TRIPLE/libpthread.so.0 "$ROOTFS_DIR/lib/"
 
 # Copy extra libraries required by host utilities (like tar)
-cp -L /usr/lib/x86_64-linux-gnu/libacl.so.1 "$ROOTFS_DIR/lib/"
-cp -L /usr/lib/x86_64-linux-gnu/libselinux.so.1 "$ROOTFS_DIR/lib/"
-cp -L /usr/lib/x86_64-linux-gnu/libpcre2-8.so.0 "$ROOTFS_DIR/lib/"
+cp -L /usr/lib/$GNU_TRIPLE/libacl.so.1 "$ROOTFS_DIR/lib/"
+cp -L /usr/lib/$GNU_TRIPLE/libselinux.so.1 "$ROOTFS_DIR/lib/"
+cp -L /usr/lib/$GNU_TRIPLE/libpcre2-8.so.0 "$ROOTFS_DIR/lib/"
 
 # Copy REAL Mesa / OpenGL / DRM / input libraries directly into rootfs/lib
 # so graphical applications can find them immediately at boot (no aupkg install needed)
 echo "Copying real Mesa/GL/DRM/input libraries..."
-HLIB="/usr/lib/x86_64-linux-gnu"
+HLIB="/usr/lib/$GNU_TRIPLE"
 
 # Core GL dispatcher and Mesa GLX implementation
 for lib in \
@@ -121,13 +133,13 @@ if [ -n "$DHCP_CLIENT" ]; then
     chmod +x "$ROOTFS_DIR/sbin/dhcpcd"
     
     # Copy resolved library dependencies of dhcpcd
-    [ -f "/usr/lib/x86_64-linux-gnu/libcrypto.so.3" ] && cp -L /usr/lib/x86_64-linux-gnu/libcrypto.so.3 "$ROOTFS_DIR/lib/"
-    [ -f "/usr/lib/x86_64-linux-gnu/libz.so.1" ] && cp -L /usr/lib/x86_64-linux-gnu/libz.so.1 "$ROOTFS_DIR/lib/"
-    [ -f "/usr/lib/x86_64-linux-gnu/libzstd.so.1" ] && cp -L /usr/lib/x86_64-linux-gnu/libzstd.so.1 "$ROOTFS_DIR/lib/"
+    [ -f "/usr/lib/$GNU_TRIPLE/libcrypto.so.3" ] && cp -L /usr/lib/$GNU_TRIPLE/libcrypto.so.3 "$ROOTFS_DIR/lib/"
+    [ -f "/usr/lib/$GNU_TRIPLE/libz.so.1" ] && cp -L /usr/lib/$GNU_TRIPLE/libz.so.1 "$ROOTFS_DIR/lib/"
+    [ -f "/usr/lib/$GNU_TRIPLE/libzstd.so.1" ] && cp -L /usr/lib/$GNU_TRIPLE/libzstd.so.1 "$ROOTFS_DIR/lib/"
     
     # Also resolve dependencies for dhclient if that was chosen
-    [ -f "/lib/x86_64-linux-gnu/libdns-export.so" ] && cp -L /lib/x86_64-linux-gnu/libdns-export.so* "$ROOTFS_DIR/lib/"
-    [ -f "/lib/x86_64-linux-gnu/libisc-export.so" ] && cp -L /lib/x86_64-linux-gnu/libisc-export.so* "$ROOTFS_DIR/lib/"
+    [ -f "/lib/$GNU_TRIPLE/libdns-export.so" ] && cp -L /lib/$GNU_TRIPLE/libdns-export.so* "$ROOTFS_DIR/lib/"
+    [ -f "/lib/$GNU_TRIPLE/libisc-export.so" ] && cp -L /lib/$GNU_TRIPLE/libisc-export.so* "$ROOTFS_DIR/lib/"
     
     echo "DHCP client and dependencies copied successfully."
 else
@@ -135,7 +147,7 @@ else
 fi
 
 # Create symbolic link for loader in /lib as well
-ln -sf /lib64/ld-linux-x86-64.so.2 "$ROOTFS_DIR/lib/ld-linux-x86-64.so.2"
+ln -sf "$LD_LINUX_PATH" "$ROOTFS_DIR/lib/$LD_LINUX_NAME" 2>/dev/null || true
 
 # Copy essential host archiving utilities (tar and gzip)
 echo "Copying archiving utilities..."

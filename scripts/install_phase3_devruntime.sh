@@ -50,7 +50,11 @@ resolve_deps() {
 
 # ── Part A: Neovim ──
 NVIM_CACHE="$CACHE_DIR/nvim.appimage"
-NVIM_URL="https://github.com/neovim/neovim/releases/download/stable/nvim-linux-x86_64.appimage"
+case "$(uname -m)" in
+    aarch64) _nvim_arch="arm64" ;;
+    *)       _nvim_arch="x86_64" ;;
+esac
+NVIM_URL="https://github.com/neovim/neovim/releases/download/stable/nvim-linux-${_nvim_arch}.appimage"
 
 if [ ! -f "$NVIM_CACHE" ] || [ "$(stat -c%s "$NVIM_CACHE")" -lt 10000000 ]; then
     echo "  + Downloading Neovim AppImage..."
@@ -77,8 +81,9 @@ EOF
 fi
 
 # ── Part B: Node.js v22 ──
-NODE_PATH_HOST="/home/uttam/.nvm/versions/node/v22.16.0"
-if [ -d "$NODE_PATH_HOST" ]; then
+NODE_BIN_HOST="$(command -v node 2>/dev/null || true)"
+NODE_PATH_HOST="$([ -n "$NODE_BIN_HOST" ] && dirname "$(dirname "$NODE_BIN_HOST")" || echo "")"
+if [ -n "$NODE_PATH_HOST" ] && [ -d "$NODE_PATH_HOST" ]; then
     echo "  + Copying Node.js v22 from host..."
     mkdir -p "$ROOTFS_DIR/usr/bin"
     

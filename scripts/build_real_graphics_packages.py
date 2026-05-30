@@ -28,8 +28,12 @@ ROOTFS_DIR  = os.path.join(PROJECT_ROOT, "rootfs")
 REPO_DIR    = os.path.join(ROOTFS_DIR, "var", "lib", "aupkg")
 PACKAGES_DIR = os.path.join(REPO_DIR, "packages")
 TMP_DIR     = os.path.join(PROJECT_ROOT, "pkg_tmp_real_graphics")
-HOST_LIB    = "/usr/lib/x86_64-linux-gnu"
-HOST_LIB32  = "/lib/x86_64-linux-gnu"
+import platform as _platform, subprocess as _sp
+_gnu_triple = _sp.check_output(["gcc", "-dumpmachine"], text=True).strip() if _sp.run(["which","gcc"], capture_output=True).returncode == 0 else {
+    "x86_64": "x86_64-linux-gnu", "aarch64": "aarch64-linux-gnu", "armv7l": "arm-linux-gnueabihf"
+}.get(_platform.machine(), "x86_64-linux-gnu")
+HOST_LIB    = f"/usr/lib/{_gnu_triple}"
+HOST_LIB32  = f"/lib/{_gnu_triple}"
 
 os.makedirs(REPO_DIR, exist_ok=True)
 os.makedirs(PACKAGES_DIR, exist_ok=True)

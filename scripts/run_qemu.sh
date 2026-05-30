@@ -83,7 +83,8 @@ if [ ! -f "$KERNEL_FILE" ]; then
         # Method D: Fallback to downloading a minimal virtualized Alpine kernel
         if [ ! -f "$KERNEL_FILE" ]; then
             info "Falling back to downloading minimal Alpine virtualized kernel..."
-            if curl -Lo "$KERNEL_FILE" "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/x86_64/netboot/vmlinuz-virt"; then
+            _alpine_arch="$(uname -m | sed 's/armv7l/armv7/')"
+            if curl -Lo "$KERNEL_FILE" "https://dl-cdn.alpinelinux.org/alpine/v3.19/releases/${_alpine_arch}/netboot/vmlinuz-virt"; then
                 success "Successfully downloaded minimal Alpine kernel to $KERNEL_FILE"
             else
                 error "Failed to obtain kernel through all available methods."
@@ -103,15 +104,21 @@ cd "$PROJECT_ROOT"
 success "Successfully packaged initramfs to $INITRAMFS_FILE ($(du -sh "$INITRAMFS_FILE" | cut -f1))"
 
 # 5. Boot inside QEMU
-if ! command -v qemu-system-x86_64 >/dev/null; then
-    error "qemu-system-x86_64 is not installed. Please install QEMU."
+case "$(uname -m)" in
+    aarch64) QEMU_BIN="qemu-system-aarch64"; QEMU_MACHINE="-machine virt -cpu cortex-a57" ;;
+    armv7l)  QEMU_BIN="qemu-system-arm";     QEMU_MACHINE="-machine virt -cpu cortex-a15" ;;
+    *)       QEMU_BIN="qemu-system-x86_64";  QEMU_MACHINE="" ;;
+esac
+
+if ! command -v "$QEMU_BIN" >/dev/null; then
+    error "$QEMU_BIN is not installed. Please install QEMU."
     exit 1
 fi
 
-info "Booting AULinux in QEMU..."
+info "Booting AULinux in QEMU ($QEMU_BIN)..."
 if [ "$1" == "--gui" ]; then
     info "Launching QEMU with graphical output..."
-    qemu-system-x86_64 \
+    $QEMU_BIN $QEMU_MACHINE \
         -kernel "$KERNEL_FILE" \
         -initrd "$INITRAMFS_FILE" \
         -append "init=/sbin/init quiet" \
@@ -123,7 +130,7 @@ else
     info "To exit QEMU, press Ctrl+A then X"
     info "--------------------------------------------------------"
     sleep 2
-    qemu-system-x86_64 \
+    $QEMU_BIN $QEMU_MACHINE \
         -kernel "$KERNEL_FILE" \
         -initrd "$INITRAMFS_FILE" \
         -append "init=/sbin/init console=ttyS0 quiet" \

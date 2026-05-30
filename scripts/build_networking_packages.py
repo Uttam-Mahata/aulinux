@@ -11,6 +11,12 @@ import sys
 import json
 import shutil
 import subprocess
+import platform as _platform
+
+_gnu_triple = (subprocess.check_output(["gcc", "-dumpmachine"], text=True).strip()
+               if subprocess.run(["which", "gcc"], capture_output=True).returncode == 0
+               else {"x86_64": "x86_64-linux-gnu", "aarch64": "aarch64-linux-gnu",
+                     "armv7l": "arm-linux-gnueabihf"}.get(_platform.machine(), "x86_64-linux-gnu"))
 
 # Define the file paths relative to this script
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -180,13 +186,13 @@ def setup_dhcp_client(pkg_src):
     if dhcp_client_path:
         shutil.copy2(dhcp_client_path, os.path.join(sbin_dir, "dhcpcd"))
         # Copy dependencies
-        for lib in ["/usr/lib/x86_64-linux-gnu/libcrypto.so.3", 
-                    "/usr/lib/x86_64-linux-gnu/libz.so.1", 
-                    "/usr/lib/x86_64-linux-gnu/libzstd.so.1"]:
+        for lib in [f"/usr/lib/{_gnu_triple}/libcrypto.so.3",
+                    f"/usr/lib/{_gnu_triple}/libz.so.1",
+                    f"/usr/lib/{_gnu_triple}/libzstd.so.1"]:
             if os.path.exists(lib):
                 shutil.copy2(lib, lib_dir)
         # Also copy extra libraries for dhclient if that is what we found
-        for lib in ["/lib/x86_64-linux-gnu/libdns-export.so", "/lib/x86_64-linux-gnu/libisc-export.so"]:
+        for lib in [f"/lib/{_gnu_triple}/libdns-export.so", f"/lib/{_gnu_triple}/libisc-export.so"]:
             import glob
             for f in glob.glob(lib + "*"):
                 shutil.copy2(f, lib_dir)

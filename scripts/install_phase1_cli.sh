@@ -92,6 +92,7 @@ done
 
 # 3. Copy essential shells/utils to /bin if not already present
 copy_binary "bash" "/bin"
+ln -sf /bin/bash "$ROOTFS_DIR/bin/sh" 2>/dev/null || true
 copy_binary "grep" "/bin"
 copy_binary "sed" "/bin"
 copy_binary "awk" "/bin"

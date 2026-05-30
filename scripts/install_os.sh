@@ -29,24 +29,39 @@ echo ""
 echo -e "${BLUE}[Step 1/4]${NC} Scanning storage adapters..."
 sleep 1
 echo -e "${GREEN}✓${NC} Scan complete. Available block devices detected:"
-echo -e "   ${CYAN}1)${NC} ${WHITE}/dev/sda${NC}  [Virtual Disk Drive - 20 GiB]"
-echo -e "   ${CYAN}2)${NC} ${WHITE}/dev/sdb${NC}  [High-Speed Flash Media - 8 GiB]"
+echo -e "   ${CYAN}1)${NC} ${WHITE}/dev/sda${NC}      [Virtual Disk Drive - 20 GiB]"
+echo -e "   ${CYAN}2)${NC} ${WHITE}/dev/sdb${NC}      [High-Speed Flash Media - 8 GiB]"
+echo -e "   ${CYAN}3)${NC} ${WHITE}/dev/nvme0n1${NC}  [High-Performance NVMe PCIe SSD - 512 GiB]"
 echo ""
-read -p "Select target drive index (1-2) [1]: " drive_choice
+read -p "Select target drive index (1-3) [1]: " drive_choice
 drive_choice=${drive_choice:-1}
 
 if [ "$drive_choice" = "2" ]; then
     TARGET_DISK="/dev/sdb"
     DISK_SIZE="8 GiB"
+elif [ "$drive_choice" = "3" ]; then
+    TARGET_DISK="/dev/nvme0n1"
+    DISK_SIZE="512 GiB"
 else
     TARGET_DISK="/dev/sda"
     DISK_SIZE="20 GiB"
 fi
-echo -e "Target selected: ${WHITE}$TARGET_DISK${NC} ($DISK_SIZE)"
+
+# Dynamically resolve partition names (NVMe devices require a 'p' separator)
+if [[ "$TARGET_DISK" =~ nvme ]]; then
+    PART1="${TARGET_DISK}p1"
+    PART2="${TARGET_DISK}p2"
+else
+    PART1="${TARGET_DISK}1"
+    PART2="${TARGET_DISK}2"
+fi
+
+echo -e "Target disk selected: ${WHITE}$TARGET_DISK${NC} ($DISK_SIZE)"
+echo -e "Staging partitions designated: ${WHITE}$PART1${NC} (and ${WHITE}$PART2${NC} if split)"
 echo ""
 
 # 2. Filesystem Selection
-echo -e "${BLUE}[Step 2/4]${NC} Configure target filesystem on ${WHITE}$TARGET_DISK${NC}"
+echo -e "${BLUE}[Step 2/4]${NC} Configure target filesystem on ${WHITE}$PART1${NC}"
 echo -e "Please select your preferred filesystem structure:"
 echo -e "   ${CYAN}1)${NC} ${GREEN}ext4${NC}  (Recommended - standard Linux journaling filesystem)"
 echo -e "   ${CYAN}2)${NC} ${GREEN}btrfs${NC} (Copy-on-write subvolume system with snapshotting)"
@@ -65,16 +80,16 @@ echo ""
 
 # 3. Partitioning Choice
 echo -e "${BLUE}[Step 3/4]${NC} Select partitioning layout:"
-echo -e "   ${CYAN}1)${NC} ${WHITE}Single Partition Layout${NC} (Stage entire OS in /dev/sda1)"
-echo -e "   ${CYAN}2)${NC} ${WHITE}Separated User Space${NC}    (Create /dev/sda1 for Root, /dev/sda2 for /home)"
+echo -e "   ${CYAN}1)${NC} ${WHITE}Single Partition Layout${NC} (Stage entire OS in $PART1)"
+echo -e "   ${CYAN}2)${NC} ${WHITE}Separated User Space${NC}    (Create $PART1 for Root, $PART2 for /home)"
 echo ""
 read -p "Select partition layout (1-2) [1]: " layout_choice
 layout_choice=${layout_choice:-1}
 
 if [ "$layout_choice" = "2" ]; then
-    LAYOUT_DESC="Root + /home split partitions"
+    LAYOUT_DESC="Root ($PART1) + /home ($PART2) split partitions"
 else
-    LAYOUT_DESC="Single primary boot partition"
+    LAYOUT_DESC="Single primary boot partition ($PART1)"
 fi
 echo -e "Partition scheme: ${WHITE}$LAYOUT_DESC${NC}"
 echo ""
@@ -99,10 +114,10 @@ echo ""
 echo -e "Creating partition tables on ${WHITE}$TARGET_DISK${NC}..."
 sleep 1.5
 if [ "$layout_choice" = "2" ]; then
-    echo -e "  ${GREEN}✓${NC} Created ${WHITE}${TARGET_DISK}1${NC} (Root partition, 12 GiB, Bootable)"
-    echo -e "  ${GREEN}✓${NC} Created ${WHITE}${TARGET_DISK}2${NC} (User partition, 8 GiB, /home)"
+    echo -e "  ${GREEN}✓${NC} Created ${WHITE}$PART1${NC} (Root partition, 12 GiB, Bootable)"
+    echo -e "  ${GREEN}✓${NC} Created ${WHITE}$PART2${NC} (User partition, 8 GiB, /home)"
 else
-    echo -e "  ${GREEN}✓${NC} Created ${WHITE}${TARGET_DISK}1${NC} ($TARGET_FS, Primary, Bootable, $DISK_SIZE)"
+    echo -e "  ${GREEN}✓${NC} Created ${WHITE}$PART1${NC} ($TARGET_FS, Primary, Bootable, $DISK_SIZE)"
 fi
 sleep 1
 
@@ -110,19 +125,19 @@ sleep 1
 echo -e "Formatting block devices..."
 sleep 1
 if [ "$layout_choice" = "2" ]; then
-    echo -e "  Formatting ${WHITE}${TARGET_DISK}1${NC} as $TARGET_FS..."
+    echo -e "  Formatting ${WHITE}$PART1${NC} as $TARGET_FS..."
     sleep 1.5
-    echo -e "  Formatting ${WHITE}${TARGET_DISK}2${NC} as ext4..."
+    echo -e "  Formatting ${WHITE}$PART2${NC} as ext4..."
     sleep 1
 else
-    echo -e "  Formatting ${WHITE}${TARGET_DISK}1${NC} as $TARGET_FS..."
+    echo -e "  Formatting ${WHITE}$PART1${NC} as $TARGET_FS..."
     sleep 2
 fi
 echo -e "  ${GREEN}✓${NC} Block format successful. UUID: a0f8b1c2-3d4e-5f6a-7b8c-9d0e1f2a3b4c"
 sleep 1
 
 # Mount Target
-echo -e "Mounting ${WHITE}${TARGET_DISK}1${NC} target directory..."
+echo -e "Mounting ${WHITE}$PART1${NC} target directory..."
 sleep 1
 
 # Copy System
@@ -164,6 +179,6 @@ echo ""
 echo -e "${GREEN}╔═══════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║${WHITE}            AULinux INSTALLATION SUCCESSFUL!               ${GREEN}║${NC}"
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════╝${NC}"
-echo -e "Congratulations! AULinux has been installed on ${WHITE}${TARGET_DISK}1${NC} (${TARGET_FS})."
+echo -e "Congratulations! AULinux has been installed on ${WHITE}$PART1${NC} (${TARGET_FS})."
 echo -e "Please disconnect the Live USB/ISO and reboot your computer."
 echo ""

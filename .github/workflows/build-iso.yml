@@ -1,66 +1,236 @@
-name: Build AULinux Live ISO
+name: Build AULinux ISO
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [main, master]
   pull_request:
-    branches: [ main, master ]
+    branches: [main, master]
   workflow_dispatch:
 
+env:
+  ALPINE_VERSION: "3.19"
+  ALPINE_RELEASE: "3.19.0"
+
 jobs:
-  build-iso:
+  build:
+    name: Build [${{ matrix.arch }}]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── x86_64 ─────────────────────────────────────────────────────────
+          - arch: x86_64
+            go_arch: amd64
+            go_arm: ""
+            cc: gcc
+            rust_linker: musl-gcc
+            rust_target: x86_64-unknown-linux-musl
+            cross_pkgs: musl-tools
+            grub_pkgs: "grub-pc-bin grub-efi-amd64-bin"
+            alpine_arch: x86_64
+            artifact_ext: iso
+
+          # ── aarch64 ────────────────────────────────────────────────────────
+          - arch: aarch64
+            go_arch: arm64
+            go_arm: ""
+            cc: aarch64-linux-gnu-gcc
+            rust_linker: aarch64-linux-gnu-gcc
+            rust_target: aarch64-unknown-linux-gnu
+            cross_pkgs: "gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu"
+            grub_pkgs: grub-efi-arm64-bin
+            alpine_arch: aarch64
+            artifact_ext: img
+
+          # ── armv7 ──────────────────────────────────────────────────────────
+          - arch: armv7
+            go_arch: arm
+            go_arm: "7"
+            cc: arm-linux-gnueabihf-gcc
+            rust_linker: arm-linux-gnueabihf-gcc
+            rust_target: armv7-unknown-linux-gnueabihf
+            cross_pkgs: "gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf"
+            grub_pkgs: ""
+            alpine_arch: armv7
+            artifact_ext: img
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
-        cache: true
+      # ── Toolchains ──────────────────────────────────────────────────────────
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
 
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        targets: x86_64-unknown-linux-gnu
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
 
-    - name: Install System Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          gcc \
-          make \
-          cpio \
-          gzip \
-          tar \
-          curl \
-          grub-common \
-          grub-pc-bin \
-          xorriso \
-          mtools \
-          libisoburn-dev \
-          linux-headers-$(uname -r)
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -q
+          PKGS="gcc cpio gzip tar curl xorriso mtools grub-common ${{ matrix.cross_pkgs }}"
+          [ -n "${{ matrix.grub_pkgs }}" ] && PKGS="$PKGS ${{ matrix.grub_pkgs }}"
+          sudo apt-get install -y --no-install-recommends $PKGS
 
-    - name: Make Scripts Executable
-      run: |
-        chmod +x scripts/build.sh
-        chmod +x scripts/make_rootfs.sh
-        chmod +x scripts/build_iso.sh
-        chmod +x scripts/install_os.sh
-        chmod +x scripts/populate_graphics_repo.sh
-        chmod +x scripts/start_desktop.sh
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
 
-    - name: Build AULinux Bootable ISO
-      run: |
-        ./scripts/build_iso.sh
+      # ── Build au-init (C) ───────────────────────────────────────────────────
+      - name: Build au-init [${{ matrix.arch }}]
+        run: |
+          mkdir -p build/init
+          ${{ matrix.cc }} -Wall -Wextra -O2 -static \
+            init/src/init.c -o build/init/au-init
 
-    - name: Upload Bootable ISO Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: aulinux-live-iso
-        path: build/aulinux.iso
-        if-no-files-found: error
-        retention-days: 7
+      # ── Build auutils (Go multicall binary) ─────────────────────────────────
+      - name: Build auutils [${{ matrix.arch }}]
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.go_arch }}
+          GOARM: ${{ matrix.go_arm }}
+        run: |
+          mkdir -p build/utils
+          go build \
+            -ldflags="-s -w -buildid=" \
+            -trimpath \
+            -o build/utils/auutils \
+            ./utils/
+          for tool in ls cat cp mv mkdir rm chmod echo pwd ps ip \
+                      useradd groupadd aubuild aush sh auctl; do
+            ln -sf auutils build/utils/$tool
+          done
+
+      # ── Build aupkg (Rust) ──────────────────────────────────────────────────
+      - name: Configure Rust cross-linker [${{ matrix.arch }}]
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << EOF
+          [target.${{ matrix.rust_target }}]
+          linker = "${{ matrix.rust_linker }}"
+          EOF
+
+      - name: Build aupkg [${{ matrix.arch }}]
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: |
+          cd pkg-manager
+          cargo build --release --target ${{ matrix.rust_target }}
+          mkdir -p ../build/pkg-manager
+          cp target/${{ matrix.rust_target }}/release/aupkg ../build/pkg-manager/
+
+      # ── Assemble rootfs ─────────────────────────────────────────────────────
+      - name: Download Alpine minirootfs [${{ matrix.arch }}]
+        run: |
+          ROOTFS_URL="https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/alpine-minirootfs-${{ env.ALPINE_RELEASE }}-${{ matrix.alpine_arch }}.tar.gz"
+          curl -fSL "$ROOTFS_URL" -o build/alpine-minirootfs.tar.gz
+          mkdir -p rootfs
+          sudo tar -xzf build/alpine-minirootfs.tar.gz -C rootfs
+
+      - name: Overlay AuLinux binaries into rootfs [${{ matrix.arch }}]
+        run: |
+          # init
+          sudo install -m 755 build/init/au-init rootfs/sbin/init
+          sudo ln -sf /sbin/init rootfs/init
+
+          # multicall utils
+          sudo install -m 755 build/utils/auutils rootfs/bin/auutils
+          for tool in ls cat cp mv mkdir rm chmod echo pwd ps ip \
+                      useradd groupadd aubuild aush sh auctl; do
+            sudo ln -sf auutils rootfs/bin/$tool
+          done
+
+          # package manager
+          sudo install -m 755 build/pkg-manager/aupkg rootfs/usr/bin/aupkg
+          sudo ln -sf /usr/bin/aupkg rootfs/bin/aupkg
+
+          # basic config
+          echo "aulinux" | sudo tee rootfs/etc/hostname > /dev/null
+          printf 'root:x:0:0:root:/root:/bin/aush\nguest:x:1000:1000:guest:/home/guest:/bin/aush\n' \
+            | sudo tee rootfs/etc/passwd > /dev/null
+          printf 'root:x:0:\nguest:x:1000:\n' \
+            | sudo tee rootfs/etc/group > /dev/null
+          printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' \
+            | sudo tee rootfs/etc/resolv.conf > /dev/null
+
+      - name: Download kernel [${{ matrix.arch }}]
+        run: |
+          curl -fSL \
+            "https://dl-cdn.alpinelinux.org/alpine/v${{ env.ALPINE_VERSION }}/releases/${{ matrix.alpine_arch }}/netboot/vmlinuz-virt" \
+            -o build/vmlinuz
+
+      - name: Build initramfs [${{ matrix.arch }}]
+        run: |
+          cd rootfs
+          sudo bash -c 'find . -print0 | cpio --null -ov --format=newc 2>/dev/null' \
+            | gzip -9 > ../build/initramfs.img
+
+      # ── Package bootable image ───────────────────────────────────────────────
+      - name: Build GRUB ISO [x86_64]
+        if: matrix.arch == 'x86_64'
+        run: |
+          mkdir -p build/iso_tmp/boot/grub
+          cp build/vmlinuz   build/iso_tmp/boot/vmlinuz
+          cp build/initramfs.img build/iso_tmp/boot/initramfs.img
+          cat > build/iso_tmp/boot/grub/grub.cfg << 'GRUBEOF'
+          set default=0
+          set timeout=15
+          set menu_color_normal=white/black
+          set menu_color_highlight=black/light-gray
+
+          menuentry "AULinux Live OS [x86_64]" {
+            linux /boot/vmlinuz init=/sbin/init console=ttyS0 console=tty0 quiet
+            initrd /boot/initramfs.img
+          }
+          menuentry "AULinux Live OS (Graphical)" {
+            linux /boot/vmlinuz init=/sbin/init quiet
+            initrd /boot/initramfs.img
+          }
+          menuentry "Install AULinux to Disk" {
+            linux /boot/vmlinuz init=/bin/install-os quiet
+            initrd /boot/initramfs.img
+          }
+          GRUBEOF
+          grub-mkrescue \
+            --modules="linux normal iso9660 biosdisk search" \
+            -o build/aulinux-x86_64.iso \
+            build/iso_tmp
+
+      - name: Build EFI disk image [aarch64]
+        if: matrix.arch == 'aarch64'
+        run: |
+          dd if=/dev/zero of=build/aulinux-aarch64.img bs=1M count=128
+          mkfs.vfat -F 32 -n AULINUX build/aulinux-aarch64.img
+          mmd -i build/aulinux-aarch64.img ::/boot ::/boot/grub
+          mcopy -i build/aulinux-aarch64.img build/vmlinuz        ::/boot/vmlinuz
+          mcopy -i build/aulinux-aarch64.img build/initramfs.img  ::/boot/initramfs.img
+          printf '%s\n' \
+            'set default=0' 'set timeout=15' \
+            'menuentry "AULinux Live OS [aarch64]" {' \
+            '  linux /boot/vmlinuz init=/sbin/init quiet' \
+            '  initrd /boot/initramfs.img' \
+            '}' \
+            | mcopy -i build/aulinux-aarch64.img - ::/boot/grub/grub.cfg
+
+      - name: Build FAT disk image [armv7]
+        if: matrix.arch == 'armv7'
+        run: |
+          dd if=/dev/zero of=build/aulinux-armv7.img bs=1M count=128
+          mkfs.vfat -F 32 -n AULINUX build/aulinux-armv7.img
+          mmd -i build/aulinux-armv7.img ::/boot
+          mcopy -i build/aulinux-armv7.img build/vmlinuz       ::/boot/vmlinuz
+          mcopy -i build/aulinux-armv7.img build/initramfs.img ::/boot/initramfs.img
+
+      # ── Upload artifact ──────────────────────────────────────────────────────
+      - name: Upload artifact [${{ matrix.arch }}]
+        uses: actions/upload-artifact@v4
+        with:
+          name: aulinux-${{ matrix.arch }}
+          path: build/aulinux-${{ matrix.arch }}.${{ matrix.artifact_ext }}
+          if-no-files-found: warn
+          retention-days: 7

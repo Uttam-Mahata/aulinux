@@ -22,6 +22,12 @@ type ifreq struct {
 }
 
 func Run(args []string) {
+	// Check root privileges
+	if os.Getuid() != 0 {
+		fmt.Fprintln(os.Stderr, "Error: this command must be run as root")
+		os.Exit(1)
+	}
+
 	// Original: os.Args[1] is the first argument after command name.
 	// Here: args[0] is the first argument after command name.
 	// Original check: len(os.Args) < 4 (cmd, link, set, dev)

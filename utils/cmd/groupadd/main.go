@@ -6,11 +6,18 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 const groupFile = "/etc/group"
 
 func Run(args []string) {
+	// Check root privileges
+	if os.Getuid() != 0 {
+		fmt.Fprintln(os.Stderr, "Error: this command must be run as root")
+		os.Exit(1)
+	}
+
 	if len(args) < 1 {
 		fmt.Println("Usage: groupadd <groupname>")
 		os.Exit(1)
@@ -18,54 +25,64 @@ func Run(args []string) {
 
 	groupname := args[0]
 
-	if groupExists(groupname) {
+	// Open group file for read-write (create if not exists)
+	f, err := os.OpenFile(groupFile, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		fmt.Printf("Error opening %s: %v\n", groupFile, err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	// Acquire exclusive lock
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		fmt.Printf("Error locking %s: %v\n", groupFile, err)
+		os.Exit(1)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+
+	if groupExists(f, groupname) {
 		fmt.Printf("Group '%s' already exists\n", groupname)
 		os.Exit(1)
 	}
 
-    gid := getNextGID()
+	gid := getNextGID(f)
 
-    // Format: groupname:x:GID:
-    entry := fmt.Sprintf("%s:x:%d:\n", groupname, gid)
+	// Format: groupname:x:GID:
+	entry := fmt.Sprintf("%s:x:%d:\n", groupname, gid)
 
-    f, err := os.OpenFile(groupFile, os.O_APPEND|os.O_WRONLY, 0644)
-    if err != nil {
-        fmt.Printf("Error opening %s: %v\n", groupFile, err)
-        os.Exit(1)
-    }
-    defer f.Close()
+	// Seek to end of file before writing
+	if _, err := f.Seek(0, 2); err != nil {
+		fmt.Printf("Error seeking to end of %s: %v\n", groupFile, err)
+		os.Exit(1)
+	}
 
-    if _, err := f.WriteString(entry); err != nil {
-        fmt.Printf("Error writing to %s: %v\n", groupFile, err)
-        os.Exit(1)
-    }
+	if _, err := f.WriteString(entry); err != nil {
+		fmt.Printf("Error writing to %s: %v\n", groupFile, err)
+		os.Exit(1)
+	}
 
-    fmt.Printf("Group '%s' created with GID %d\n", groupname, gid)
+	fmt.Printf("Group '%s' created with GID %d\n", groupname, gid)
 }
 
-func groupExists(name string) bool {
-    f, err := os.Open(groupFile)
-    if err != nil {
-        return false
-    }
-    defer f.Close()
+func groupExists(f *os.File, name string) bool {
+	if _, err := f.Seek(0, 0); err != nil {
+		return false
+	}
 
-    scanner := bufio.NewScanner(f)
-    for scanner.Scan() {
-        parts := strings.Split(scanner.Text(), ":")
-        if len(parts) > 0 && parts[0] == name {
-            return true
-        }
-    }
-    return false
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		parts := strings.Split(scanner.Text(), ":")
+		if len(parts) > 0 && parts[0] == name {
+			return true
+		}
+	}
+	return false
 }
 
-func getNextGID() int {
-	f, err := os.Open(groupFile)
-	if err != nil {
+func getNextGID(f *os.File) int {
+	if _, err := f.Seek(0, 0); err != nil {
 		return 1000
 	}
-	defer f.Close()
 
 	maxGID := 999
 	scanner := bufio.NewScanner(f)
@@ -80,3 +97,4 @@ func getNextGID() int {
 	}
 	return maxGID + 1
 }
+

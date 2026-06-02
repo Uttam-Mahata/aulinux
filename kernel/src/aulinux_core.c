@@ -20,6 +20,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("AULinux Team");
 MODULE_DESCRIPTION("AULinux Core Kernel Module");
 MODULE_VERSION(AULINUX_VERSION);
+MODULE_SOFTDEP("pre: aulinux_sysctl");
 
 /* Proc filesystem entry */
 static struct proc_dir_entry *aulinux_proc_dir;

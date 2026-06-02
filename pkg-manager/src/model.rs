@@ -25,6 +25,8 @@ pub struct Package {
     pub install_date: i64,
     #[serde(default)]
     pub files: Vec<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 impl Package {
@@ -45,6 +47,7 @@ impl Package {
             installed: false,
             install_date: 0,
             files: vec![],
+            sha256: None,
         }
     }
 

@@ -139,6 +139,96 @@ fn validate_archive_files(files: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn verify_symlink_safety_str(tvf_output: &str) -> Result<(), String> {
+    for line in tvf_output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('l') || line.contains(" -> ") {
+            if let Some(pos) = line.find(" -> ") {
+                let left = line[..pos].trim();
+                let target = line[pos + 4..].trim();
+                
+                let link_path = match left.split_whitespace().last() {
+                    Some(path) => path,
+                    None => continue,
+                };
+                
+                if target.starts_with('/') || std::path::Path::new(target).is_absolute() {
+                    return Err(format!("Unsafe symlink target: absolute target path '{}' not allowed", target));
+                }
+                
+                let link_path_buf = std::path::Path::new(link_path);
+                let parent_path = link_path_buf.parent().unwrap_or(std::path::Path::new(""));
+                let mut symlink_depth = 0;
+                for comp in parent_path.components() {
+                    match comp {
+                        std::path::Component::Normal(_) => {
+                            symlink_depth += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                
+                let target_path_buf = std::path::Path::new(target);
+                let mut parent_dir_count = 0;
+                for comp in target_path_buf.components() {
+                    match comp {
+                        std::path::Component::ParentDir => {
+                            parent_dir_count += 1;
+                        }
+                        std::path::Component::RootDir => {
+                            return Err(format!("Unsafe symlink target: absolute target path '{}' not allowed", target));
+                        }
+                        _ => {}
+                    }
+                }
+                
+                if parent_dir_count > symlink_depth {
+                    return Err(format!(
+                        "Unsafe symlink target: '{}' escapes root from '{}' (parent depth: {}, target parent count: {})",
+                        target, link_path, symlink_depth, parent_dir_count
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_symlink_safety(archive_path: &std::path::Path) -> Result<(), String> {
+    let output_res = Command::new("tar")
+        .arg("-tvf")
+        .arg(archive_path)
+        .output();
+    if output_res.is_err() || !output_res.as_ref().unwrap().status.success() {
+        return Err(format!("Failed to read archive symlinks: {:?}", archive_path));
+    }
+    let stdout = output_res.unwrap().stdout;
+    let tvf_str = String::from_utf8_lossy(&stdout);
+    verify_symlink_safety_str(&tvf_str)
+}
+
+fn verify_checksum(archive_path: &std::path::Path, expected_sha: &str) -> Result<(), String> {
+    let output_res = Command::new("sha256sum")
+        .arg(archive_path)
+        .output();
+    if output_res.is_err() || !output_res.as_ref().unwrap().status.success() {
+        return Err(format!("Failed to run sha256sum on archive: {:?}", archive_path));
+    }
+    let stdout = output_res.unwrap().stdout;
+    let sha_str = String::from_utf8_lossy(&stdout);
+    let computed_sha = sha_str.split_whitespace().next().unwrap_or("").trim();
+    if computed_sha != expected_sha {
+        return Err(format!(
+            "Checksum mismatch: expected '{}', got '{}'",
+            expected_sha, computed_sha
+        ));
+    }
+    Ok(())
+}
+
 pub fn execute(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load();
     let mut db = PackageDatabase::new(config);
@@ -227,6 +317,14 @@ pub fn execute(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
+                    // Checksum verification
+                    if let Some(expected_sha) = &pkg.sha256 {
+                        println!("Verifying SHA256 checksum...");
+                        if let Err(err) = verify_checksum(&archive_path, expected_sha) {
+                            let _ = fs::remove_file(&archive_path);
+                            return Err(format!("Checksum verification failed: {}", err).into());
+                        }
+                    }
 
                     // List files
                     println!("Listing files...");
@@ -251,6 +349,12 @@ pub fn execute(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         return Err(format!("Package safety validation failed: {}", err).into());
                     }
 
+                    // Verify symlink target safety
+                    if let Err(err) = verify_symlink_safety(&archive_path) {
+                        let _ = fs::remove_file(&archive_path);
+                        return Err(format!("Package safety validation failed: {}", err).into());
+                    }
+
                     pkg.files = files;
 
                     // Extract safely
@@ -264,6 +368,15 @@ pub fn execute(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
                     if status.is_err() || !status.unwrap().success() {
                         let _ = fs::remove_file(&archive_path);
+                        for file in pkg.files.iter().rev() {
+                            let path = std::path::Path::new("/").join(file);
+                            if path == std::path::Path::new("/") { continue; }
+                            if path.is_dir() {
+                                let _ = fs::remove_dir(&path);
+                            } else {
+                                let _ = fs::remove_file(&path);
+                            }
+                        }
                         return Err(format!("Failed to extract archive: {:?}", archive_path).into());
                     }
 
@@ -271,12 +384,12 @@ pub fn execute(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     let _ = fs::remove_file(&archive_path);
 
                     db.add_installed(pkg.clone());
+                    db.save_installed()?;
                     println!("Successfully installed {}.", pkg.name);
                 } else {
                     println!("Package {} not found in repositories.", pkg_name);
                 }
             }
-            db.save_installed()?;
         }
         Commands::Remove { packages } => {
             println!("Removing packages: {:?}", packages);
@@ -392,6 +505,16 @@ pub fn execute(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
+                        // Checksum verification
+                        if let Some(expected_sha) = &pkg.sha256 {
+                            println!("Verifying SHA256 checksum...");
+                            if let Err(err) = verify_checksum(&archive_path, expected_sha) {
+                                eprintln!("Checksum verification failed for upgrade {}: {}", pkg_name, err);
+                                let _ = fs::remove_file(&archive_path);
+                                continue;
+                            }
+                        }
+
                         // List + validate
                         let output_res = Command::new("tar")
                             .arg("-tf")
@@ -410,6 +533,14 @@ pub fn execute(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             let _ = fs::remove_file(&archive_path);
                             continue;
                         }
+
+                        // Verify symlink target safety
+                        if let Err(err) = verify_symlink_safety(&archive_path) {
+                            eprintln!("Symlink safety check failed for upgrade {}: {}", pkg_name, err);
+                            let _ = fs::remove_file(&archive_path);
+                            continue;
+                        }
+
                         pkg.files = files;
 
                         // Extract
@@ -422,14 +553,23 @@ pub fn execute(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         let _ = fs::remove_file(&archive_path);
                         if status.is_err() || !status.unwrap().success() {
                             eprintln!("Failed to extract upgrade archive for {}", pkg_name);
+                            for file in pkg.files.iter().rev() {
+                                let path = std::path::Path::new("/").join(file);
+                                if path == std::path::Path::new("/") { continue; }
+                                if path.is_dir() {
+                                    let _ = fs::remove_dir(&path);
+                                } else {
+                                    let _ = fs::remove_file(&path);
+                                }
+                            }
                             continue;
                         }
 
                         db.add_installed(pkg.clone());
+                        db.save_installed()?;
                         println!("Successfully upgraded {}.", pkg.name);
                     }
                 }
-                db.save_installed()?;
             }
         }
         Commands::Search { keyword } => {
@@ -508,6 +648,29 @@ mod tests {
             "/etc/shadow".to_string(),
         ];
         assert!(validate_archive_files(&files).is_err());
+    }
+
+    #[test]
+    fn test_verify_symlink_safety_str() {
+        // Safe relative symlink with same depth
+        let tvf_output_safe1 = "lrwxrwxrwx root/root 0 2026-06-02 08:00 usr/bin/link -> ../lib/target";
+        assert!(verify_symlink_safety_str(tvf_output_safe1).is_ok());
+
+        // Safe relative symlink with less depth
+        let tvf_output_safe2 = "lrwxrwxrwx root/root 0 2026-06-02 08:00 usr/bin/link -> ./target";
+        assert!(verify_symlink_safety_str(tvf_output_safe2).is_ok());
+
+        // Unsafe relative symlink escaping root
+        let tvf_output_unsafe1 = "lrwxrwxrwx root/root 0 2026-06-02 08:00 usr/bin/link -> ../../../etc/shadow";
+        assert!(verify_symlink_safety_str(tvf_output_unsafe1).is_err());
+
+        // Unsafe absolute symlink
+        let tvf_output_unsafe2 = "lrwxrwxrwx root/root 0 2026-06-02 08:00 usr/bin/link -> /etc/shadow";
+        assert!(verify_symlink_safety_str(tvf_output_unsafe2).is_err());
+        
+        // Link at root level escaping root
+        let tvf_output_unsafe3 = "lrwxrwxrwx root/root 0 2026-06-02 08:00 link -> ../etc/shadow";
+        assert!(verify_symlink_safety_str(tvf_output_unsafe3).is_err());
     }
 
     #[test]

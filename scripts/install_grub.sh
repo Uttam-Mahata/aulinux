@@ -55,6 +55,20 @@ if [ "$EUID" -eq 0 ]; then
     read -p "Run these commands now? (y/n) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
+        LOOPDEV=""
+        cleanup() {
+            if mountpoint -q /mnt/aulinux_mnt 2>/dev/null || grep -qs '/mnt/aulinux_mnt' /proc/mounts; then
+                umount -l /mnt/aulinux_mnt
+            fi
+            if [ -n "$LOOPDEV" ] && losetup "$LOOPDEV" >/dev/null 2>&1; then
+                losetup -d "$LOOPDEV"
+            fi
+            if [ -d /mnt/aulinux_mnt ]; then
+                rmdir /mnt/aulinux_mnt
+            fi
+        }
+        trap cleanup EXIT
+
         dd if=/dev/zero of="$IMAGE_FILE" bs=1M count=512
         parted "$IMAGE_FILE" --script mklabel msdos mkpart primary ext4 1MiB 100% set 1 boot on
         LOOPDEV=$(losetup -fP --show "$IMAGE_FILE")
@@ -76,9 +90,8 @@ if [ "$EUID" -eq 0 ]; then
         mkdir -p /mnt/aulinux_mnt/boot/grub
         cp bootloader/grub.cfg /mnt/aulinux_mnt/boot/grub/grub.cfg
 
-        umount /mnt/aulinux_mnt
-        losetup -d "$LOOPDEV"
-        rmdir /mnt/aulinux_mnt
+        cleanup
+        trap - EXIT
         echo "Done."
     fi
 fi

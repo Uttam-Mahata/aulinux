@@ -19,6 +19,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("AULinux Team");
 MODULE_DESCRIPTION("AULinux Process Lifecycle Monitor");
 MODULE_VERSION("1.0.0");
+MODULE_SOFTDEP("pre: aulinux_core");
 
 #define PROCMON_HISTORY_SIZE 64
 
@@ -102,7 +103,7 @@ static int exit_handler_pre(struct kprobe *p, struct pt_regs *regs)
 
 /* Kprobe structures */
 static struct kprobe fork_kp = {
-    .symbol_name = "do_fork",
+    .symbol_name = "kernel_clone",
     .pre_handler = fork_handler_pre,
 };
 

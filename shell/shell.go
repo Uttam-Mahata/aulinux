@@ -92,6 +92,24 @@ func init() {
 }
 
 func Run(args []string) {
+	// Intercept --run-builtin
+	for idx := 0; idx <= 1 && idx < len(args); idx++ {
+		if args[idx] == "--run-builtin" {
+			if idx+1 < len(args) {
+				cmdName := args[idx+1]
+				shell := NewShell()
+				if builtin, ok := builtins[cmdName]; ok {
+					cmdArgs := args[idx+2:]
+					os.Exit(builtin(shell, cmdArgs))
+				}
+				fmt.Fprintf(os.Stderr, "aush: builtin not found: %s\n", cmdName)
+				os.Exit(1)
+			}
+			fmt.Fprintln(os.Stderr, "aush: --run-builtin requires a command argument")
+			os.Exit(1)
+		}
+	}
+
 	shell := NewShell()
 
 	scriptFile := ""
@@ -479,7 +497,17 @@ func (s *Shell) executePipeline(line string) int {
 
 		args = s.expandVariables(args)
 		argSets = append(argSets, args)
-		cmd := exec.Command(args[0], args[1:]...)
+		var cmd *exec.Cmd
+		if _, ok := builtins[args[0]]; ok {
+			shellExe, err := os.Executable()
+			if err != nil {
+				shellExe = "/bin/aush"
+			}
+			cmdArgs := append([]string{"--run-builtin", args[0]}, args[1:]...)
+			cmd = exec.Command(shellExe, cmdArgs...)
+		} else {
+			cmd = exec.Command(args[0], args[1:]...)
+		}
 		cmds = append(cmds, cmd)
 	}
 
